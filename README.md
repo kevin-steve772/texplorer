@@ -7,6 +7,7 @@ TExplorer 是一个使用 C++17 和 ncursesw 编写的终端文件管理器。�
 - 目录浏览、面包屑地址栏，以及后退 / 前进 / 上一级导航
 - 多标签页：新建、关闭、切换，中键点击标签即可关闭
 - 文件操作：复制、剪切、粘贴、重命名、删除、新建文件夹、查看属性
+- 打开文件：普通文件使用 `nano` 编辑，可执行文件直接运行
 - 多选：`Ctrl+单击` 多选、`Shift+单击` 连续选择、`Ctrl+A` 全选
 - 排序：按名称、修改日期、类型、大小排序，支持升序 / 降序；点击表头也可切换
 - 显示 / 隐藏隐藏文件
@@ -32,29 +33,30 @@ TExplorer 是一个使用 C++17 和 ncursesw 编写的终端文件管理器。�
 - CMake >= 3.16
 - pkg-config
 - ncursesw（宽字符版 ncurses）
+- nano（编辑普通文件时使用）
 
 Ubuntu / Debian：
 
 ```bash
-sudo apt install build-essential cmake pkg-config libncurses-dev
+sudo apt install build-essential cmake pkg-config libncurses-dev nano
 ```
 
 较旧的 Ubuntu / Debian 可能使用：
 
 ```bash
-sudo apt install libncursesw5-dev
+sudo apt install libncursesw5-dev nano
 ```
 
 Fedora：
 
 ```bash
-sudo dnf install gcc-c++ cmake pkgconf ncurses-devel
+sudo dnf install gcc-c++ cmake pkgconf ncurses-devel nano
 ```
 
 Arch Linux：
 
 ```bash
-sudo pacman -S base-devel cmake pkgconf ncurses
+sudo pacman -S base-devel cmake pkgconf ncurses nano
 ```
 
 ### 编译
@@ -106,7 +108,7 @@ set -g mouse on
 | `↑` / `↓` | 上下移动光标 |
 | `PgUp` / `PgDn` | 翻页 |
 | `Home` / `End` | 跳到列表首 / 尾 |
-| `Enter` | 打开选中项目 |
+| `Enter` | 打开选中项目；文件用 `nano` 编辑，可执行文件直接运行 |
 | `Backspace` | 后退 |
 | `Ctrl+U` | 上一级目录 |
 | `Ctrl+A` | 全选 |
@@ -171,6 +173,8 @@ set -g mouse on
 ## 说明
 
 - 删除操作会直接删除文件或目录，不会移入回收站，请谨慎使用。
+- 打开普通文件时会暂停 TUI 并调用 `nano`，退出 `nano` 后自动恢复界面。
+- 具有执行权限的普通文件会直接在当前终端运行，程序结束后恢复 TUI。
 - 复制 / 剪切 / 粘贴为应用内剪贴板，不调用系统剪贴板。
 - 标签页共享隐藏文件显示、导航窗格等全局视图设置。
 - 项目当前没有配置文件，启动参数仅支持起始目录。

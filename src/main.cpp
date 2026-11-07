@@ -1410,28 +1410,41 @@ void App::openCurrent() {
 }
 
 void App::openExternal(const fs::path& p) {
+    struct stat st{};
+    bool executable = (::stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
+                       ::access(p.c_str(), X_OK) == 0);
+
+    def_prog_mode();
+    endwin();
+
     pid_t pid = fork();
     if (pid == 0) {
-        pid_t inner = fork();
-        if (inner == 0) {
-            setsid();
-            int fd = ::open("/dev/null", O_RDWR);
-            if (fd >= 0) {
-                dup2(fd, STDIN_FILENO);
-                dup2(fd, STDOUT_FILENO);
-                dup2(fd, STDERR_FILENO);
-                if (fd > 2)
-                    close(fd);
-            }
-            execlp("xdg-open", "xdg-open", p.c_str(), (char*)nullptr);
-            _exit(127);
-        }
-        _exit(0);
+        (void)chdir(current.c_str());
+        if (executable)
+            execl(p.c_str(), p.filename().c_str(), (char*)nullptr);
+        else
+            execlp("nano", "nano", p.c_str(), (char*)nullptr);
+        _exit(127);
     }
-    if (pid > 0) {
-        int st = 0;
-        waitpid(pid, &st, 0);
+
+    int status = 0;
+    if (pid > 0)
+        waitpid(pid, &status, 0);
+
+    reset_prog_mode();
+    ::refresh();
+
+    if (pid < 0) {
+        setStatus("无法启动进程");
+    } else if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
+        setStatus(executable ? "无法运行: " + p.filename().string()
+                             : "无法启动 nano");
+    } else if (executable) {
+        setStatus("已运行 " + p.filename().string());
+    } else {
+        setStatus("已用 nano 编辑 " + p.filename().string());
     }
+    refresh();
 }
 
 void App::copySel(bool cut) {
@@ -1664,6 +1677,7 @@ void App::showHelp() {
                            "地址栏左侧为后退/前进/上级；右上角 × 退出程序。",
                            "鼠标：单击选择，双击打开，滚轮滚动。",
                            "键盘：↑↓ 移动，Enter 打开，Backspace 后退。",
+                           "打开：普通文件用 nano 编辑，可执行文件直接运行。",
                            "F2 重命名，F4 属性，F5 刷新，F7 新建文件夹。",
                            "F9 显示隐藏项目，F10 退出。",
                            "Ctrl+C 复制，Ctrl+X 剪切，Ctrl+V 粘贴。",
