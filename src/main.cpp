@@ -1,6 +1,7 @@
 #include <ncurses.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <climits>
 #include <cmath>
@@ -12,6 +13,7 @@
 #include <ctime>
 #include <cwchar>
 #include <filesystem>
+#include <fstream>
 #include <set>
 #include <string>
 #include <sys/stat.h>
@@ -354,6 +356,118 @@ static bool isSubPath(const fs::path& child, const fs::path& parent) {
     return true;
 }
 
+static fs::path trashBasePath() {
+    const char* xdg = std::getenv("XDG_DATA_HOME");
+    if (xdg && *xdg)
+        return fs::path(xdg) / "Trash";
+    const char* home = std::getenv("HOME");
+    if (home && *home)
+        return fs::path(home) / ".local" / "share" / "Trash";
+    return fs::path(".local") / "share" / "Trash";
+}
+
+static std::string urlEncodePath(const std::string& s) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : s) {
+        bool safe = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
+                    c == '~' || c == '/';
+        if (safe) {
+            out.push_back((char)c);
+        } else {
+            out.push_back('%');
+            out.push_back(hex[c >> 4]);
+            out.push_back(hex[c & 0x0F]);
+        }
+    }
+    return out;
+}
+
+static int hexValue(char c) {
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+static std::string urlDecodePath(const std::string& s) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            int hi = hexValue(s[i + 1]);
+            int lo = hexValue(s[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back((char)(hi * 16 + lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(s[i]);
+    }
+    return out;
+}
+
+static std::string deletionDate() {
+    std::time_t now = std::time(nullptr);
+    std::tm tmv{};
+    localtime_r(&now, &tmv);
+    char buf[32] = {};
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tmv);
+    return buf;
+}
+
+static bool writeTrashInfo(const fs::path& infoPath, const fs::path& original) {
+    std::ofstream out(infoPath, std::ios::binary | std::ios::trunc);
+    if (!out)
+        return false;
+    out << "[Trash Info]\n";
+    out << "Path=" << urlEncodePath(original.string()) << "\n";
+    out << "DeletionDate=" << deletionDate() << "\n";
+    out.flush();
+    return out.good();
+}
+
+static bool readTrashInfo(const fs::path& infoPath, fs::path& original) {
+    std::ifstream in(infoPath, std::ios::binary);
+    if (!in)
+        return false;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.rfind("Path=", 0) == 0) {
+            std::string decoded = urlDecodePath(line.substr(5));
+            if (decoded.empty())
+                return false;
+            original = fs::path(decoded);
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool movePath(const fs::path& src, const fs::path& dst, std::error_code& ec) {
+    ec.clear();
+    fs::rename(src, dst, ec);
+    if (!ec)
+        return true;
+    ec.clear();
+    fs::copy(src, dst, fs::copy_options::recursive | fs::copy_options::copy_symlinks, ec);
+    if (ec)
+        return false;
+    std::error_code e2;
+    fs::remove_all(src, e2);
+    if (e2) {
+        ec = e2;
+        return false;
+    }
+    return true;
+}
+
 static int dlgButtonW(const std::string& label) {
     return utf8Cols(label) + 4;
 }
@@ -381,6 +495,8 @@ private:
         CMD_NEWFOLDER,
         CMD_RENAME,
         CMD_DELETE,
+        CMD_RESTORE,
+        CMD_EMPTY_TRASH,
         CMD_COPY,
         CMD_CUT,
         CMD_PASTE,
@@ -449,6 +565,8 @@ private:
 
     fs::path startPath;
     fs::path current;
+    fs::path trashFiles;
+    fs::path trashInfo;
     std::vector<Entry> entries;
     std::vector<fs::path> history;
     int histPos = 0;
@@ -533,6 +651,14 @@ private:
 
     void openCurrent();
     void openExternal(const fs::path& p);
+
+    bool inTrash() const;
+    std::string displayName(const fs::path& p) const;
+    std::string uniqueTrashName(const std::string& filename) const;
+    void moveToTrash(const std::vector<fs::path>& items);
+    void trashDeleteSelection(const std::vector<fs::path>& items);
+    void restoreSelection();
+    void emptyTrash();
 
     void copySel(bool cut);
     void paste();
@@ -629,6 +755,14 @@ void App::initState(const fs::path& start) {
     anchor = 0;
     selected.clear();
 
+    fs::path trashBase = trashBasePath();
+    trashFiles = trashBase / "files";
+    trashInfo = trashBase / "info";
+    std::error_code tec;
+    fs::create_directories(trashFiles, tec);
+    tec.clear();
+    fs::create_directories(trashInfo, tec);
+
     quickItems.clear();
     const char* home = std::getenv("HOME");
     if (home && *home) {
@@ -653,6 +787,7 @@ void App::initState(const fs::path& start) {
         }
     }
     quickItems.push_back({"/", "根目录", fs::path("/")});
+    quickItems.push_back({"🗑", "回收站", normPath(trashFiles)});
 
     refresh();
 }
@@ -818,9 +953,7 @@ void App::drawTabs() {
     std::vector<int> widths;
     for (size_t i = 0; i < tabs.size(); ++i) {
         fs::path p = (i == (size_t)activeTab) ? current : tabs[i].current;
-        std::string name = p.filename().string();
-        if (name.empty())
-            name = "/";
+        std::string name = displayName(p);
         name = utf8Clip(sanitize(name), 20);
         std::string lab = " " + name + " ";
         labels.push_back(lab);
@@ -886,6 +1019,19 @@ void App::drawAddress() {
         x += w + 1;
     }
     int startX = x;
+
+    if (inTrash()) {
+        crumbRects.clear();
+        crumbPaths.clear();
+        std::string lab = "🗑 回收站";
+        int lw = utf8Cols(lab);
+        if (startX + lw <= COLS - 1) {
+            wput(stdscr, addrY, startX, lw, lab, A_REVERSE | A_BOLD);
+            crumbRects.push_back(Rect{addrY, startX, 1, lw});
+            crumbPaths.push_back(trashFiles);
+        }
+        return;
+    }
 
     std::vector<fs::path> chain;
     fs::path p = current;
@@ -1447,7 +1593,186 @@ void App::openExternal(const fs::path& p) {
     refresh();
 }
 
+bool App::inTrash() const {
+    return !trashFiles.empty() && samePath(current, trashFiles);
+}
+
+std::string App::displayName(const fs::path& p) const {
+    if (!trashFiles.empty() && samePath(p, trashFiles))
+        return "回收站";
+    std::string name = p.filename().string();
+    return name.empty() ? "/" : name;
+}
+
+std::string App::uniqueTrashName(const std::string& filename) const {
+    auto exists = [&](const std::string& n) {
+        std::error_code e;
+        return fs::exists(trashFiles / n, e) || fs::exists(trashInfo / (n + ".trashinfo"), e);
+    };
+    if (!exists(filename))
+        return filename;
+    fs::path fp(filename);
+    std::string stem = fp.stem().string();
+    std::string ext = fp.extension().string();
+    if (stem.empty())
+        stem = filename;
+    for (int i = 2; i < 10000; ++i) {
+        std::string n = stem + " (" + std::to_string(i) + ")" + ext;
+        if (!exists(n))
+            return n;
+    }
+    return filename + "." + std::to_string((long)std::time(nullptr));
+}
+
+void App::moveToTrash(const std::vector<fs::path>& items) {
+    std::error_code ec;
+    fs::create_directories(trashFiles, ec);
+    ec.clear();
+    fs::create_directories(trashInfo, ec);
+
+    int ok = 0, fail = 0;
+    for (const fs::path& src : items) {
+        std::error_code e;
+        if (!fs::exists(src, e)) {
+            fail++;
+            continue;
+        }
+        fs::path original = src;
+        std::error_code ae;
+        fs::path abs = fs::absolute(src, ae);
+        if (!ae)
+            original = abs;
+
+        std::string name = uniqueTrashName(src.filename().string());
+        fs::path dst = trashFiles / name;
+        if (!movePath(src, dst, e)) {
+            fail++;
+            continue;
+        }
+        fs::path info = trashInfo / (name + ".trashinfo");
+        if (!writeTrashInfo(info, original)) {
+            std::error_code e2;
+            movePath(dst, src, e2);
+            fs::remove(info, e2);
+            fail++;
+            continue;
+        }
+        ok++;
+    }
+
+    refresh();
+    if (fail > 0)
+        infoDialog("回收站", {"已移入回收站 " + std::to_string(ok) + " 个项目，",
+                              std::to_string(fail) + " 个失败。"});
+    else
+        setStatus("已移入回收站 " + std::to_string(ok) + " 个项目");
+}
+
+void App::trashDeleteSelection(const std::vector<fs::path>& items) {
+    int ok = 0, fail = 0;
+    for (const fs::path& p : items) {
+        std::error_code ec;
+        fs::remove_all(p, ec);
+        if (ec) {
+            fail++;
+            continue;
+        }
+        std::error_code e2;
+        fs::remove(trashInfo / (p.filename().string() + ".trashinfo"), e2);
+        ok++;
+    }
+    refresh();
+    if (fail > 0)
+        infoDialog("永久删除", {"已永久删除 " + std::to_string(ok) + " 个项目，",
+                                std::to_string(fail) + " 个删除失败。"});
+    else
+        setStatus("已永久删除 " + std::to_string(ok) + " 个项目");
+}
+
+void App::restoreSelection() {
+    if (!inTrash())
+        return;
+    std::vector<fs::path> items = selectionPaths();
+    if (items.empty()) {
+        setStatus("没有可还原的项目");
+        return;
+    }
+
+    int ok = 0, fail = 0;
+    for (const fs::path& src : items) {
+        std::string name = src.filename().string();
+        fs::path info = trashInfo / (name + ".trashinfo");
+        fs::path original;
+        if (!readTrashInfo(info, original)) {
+            fail++;
+            continue;
+        }
+
+        std::error_code ec;
+        fs::path parent = original.parent_path();
+        if (parent.empty())
+            parent = fs::path("/");
+        fs::create_directories(parent, ec);
+        if (ec) {
+            fail++;
+            continue;
+        }
+
+        fs::path dst = original;
+        if (fs::exists(dst, ec))
+            dst = parent / uniqueName(parent, original.filename().string());
+
+        ec.clear();
+        if (!movePath(src, dst, ec)) {
+            fail++;
+            continue;
+        }
+        std::error_code e2;
+        fs::remove(info, e2);
+        ok++;
+    }
+
+    refresh();
+    if (fail > 0)
+        infoDialog("还原", {"已还原 " + std::to_string(ok) + " 个项目，",
+                            std::to_string(fail) + " 个失败（可能缺少回收站信息）。"});
+    else
+        setStatus("已还原 " + std::to_string(ok) + " 个项目");
+}
+
+void App::emptyTrash() {
+    if (!inTrash())
+        return;
+    if (!confirmDialog("清空回收站", "确定要永久删除回收站中的所有项目吗？\n此操作无法撤销。"))
+        return;
+
+    int fail = 0;
+    auto clearDir = [&](const fs::path& dir) {
+        std::error_code ec;
+        fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
+        while (!ec && it != end) {
+            std::error_code e;
+            fs::remove_all(it->path(), e);
+            if (e)
+                fail++;
+            it.increment(ec);
+        }
+    };
+    clearDir(trashFiles);
+    clearDir(trashInfo);
+
+    refresh();
+    if (fail > 0)
+        infoDialog("清空回收站", {"有 " + std::to_string(fail) + " 个项目删除失败。"});
+    else
+        setStatus("回收站已清空");
+}
+
 void App::copySel(bool cut) {
+    if (inTrash()) {
+        setStatus("回收站中不能复制或剪切，请使用“还原”");
+        return;
+    }
     std::vector<fs::path> items = selectionPaths();
     if (items.empty()) {
         setStatus("没有选中的项目");
@@ -1487,6 +1812,10 @@ std::string App::uniqueCopyName(const fs::path& dir, const std::string& filename
 }
 
 void App::paste() {
+    if (inTrash()) {
+        setStatus("回收站中不能粘贴");
+        return;
+    }
     if (clipboard.empty()) {
         setStatus("剪贴板为空");
         return;
@@ -1573,28 +1902,27 @@ void App::deleteSelection() {
         setStatus("没有可删除的项目");
         return;
     }
-    std::string msg = "确定要永久删除选中的 " + std::to_string(items.size()) +
-                      " 个项目吗？\n此操作无法撤销。";
-    if (!confirmDialog("删除", msg))
+    if (inTrash()) {
+        std::string msg = "确定要永久删除选中的 " + std::to_string(items.size()) +
+                          " 个项目吗？\n此操作无法撤销。";
+        if (!confirmDialog("永久删除", msg))
+            return;
+        trashDeleteSelection(items);
         return;
-
-    int ok = 0, fail = 0;
-    for (const fs::path& p : items) {
-        std::error_code ec;
-        uintmax_t n = fs::remove_all(p, ec);
-        if (ec || n == static_cast<uintmax_t>(-1))
-            fail++;
-        else
-            ok++;
     }
-    refresh();
-    if (fail > 0)
-        infoDialog("删除", {"已删除 " + std::to_string(ok) + " 个项目，", std::to_string(fail) + " 个删除失败。"});
-    else
-        setStatus("已删除 " + std::to_string(ok) + " 个项目");
+
+    std::string msg = "确定要将选中的 " + std::to_string(items.size()) +
+                      " 个项目移到回收站吗？";
+    if (!confirmDialog("移到回收站", msg))
+        return;
+    moveToTrash(items);
 }
 
 void App::newFolder() {
+    if (inTrash()) {
+        setStatus("回收站中不能新建文件夹");
+        return;
+    }
     std::string name = uniqueName(current, "新建文件夹");
     if (!inputDialog("新建文件夹", "文件夹名称:", name))
         return;
@@ -1623,6 +1951,10 @@ void App::newFolder() {
 }
 
 void App::renameCurrent() {
+    if (inTrash()) {
+        setStatus("回收站中不能重命名");
+        return;
+    }
     if (entries.empty() || cursor < 0 || cursor >= (int)entries.size())
         return;
     Entry e = entries[cursor];
@@ -1678,6 +2010,7 @@ void App::showHelp() {
                            "鼠标：单击选择，双击打开，滚轮滚动。",
                            "键盘：↑↓ 移动，Enter 打开，Backspace 后退。",
                            "打开：普通文件用 nano 编辑，可执行文件直接运行。",
+                           "删除会移入左侧“回收站”；在回收站中可还原或永久删除。",
                            "F2 重命名，F4 属性，F5 刷新，F7 新建文件夹。",
                            "F9 显示隐藏项目，F10 退出。",
                            "Ctrl+C 复制，Ctrl+X 剪切，Ctrl+V 粘贴。",
@@ -1864,6 +2197,12 @@ void App::executeCmd(Cmd cmd) {
     case CMD_DELETE:
         deleteSelection();
         break;
+    case CMD_RESTORE:
+        restoreSelection();
+        break;
+    case CMD_EMPTY_TRASH:
+        emptyTrash();
+        break;
     case CMD_COPY:
         copySel(false);
         break;
@@ -1933,34 +2272,49 @@ void App::showActionMenu(int px, int py) {
             s += sortAsc ? " ↑" : " ↓";
         return s;
     };
-    std::vector<MenuItem> items = {
-        {CMD_OPEN, "打开", has, false},
-        {CMD_NONE, "", false, true},
-        {CMD_COPY, "复制", has, false},
-        {CMD_CUT, "剪切", has, false},
-        {CMD_PASTE, "粘贴", !clipboard.empty(), false},
-        {CMD_RENAME, "重命名", has, false},
-        {CMD_DELETE, "删除", has, false},
-        {CMD_PROPERTIES, "属性", has, false},
-        {CMD_NONE, "", false, true},
-        {CMD_NEWFOLDER, "新建文件夹", true, false},
-        {CMD_REFRESH, "刷新", true, false},
-        {CMD_SELECTALL, "全选", has, false},
-        {CMD_TOGGLEHIDDEN, showHidden ? "隐藏隐藏项目" : "显示隐藏项目", true, false},
-        {CMD_TOGGLESIDEBAR, showSidebar ? "隐藏导航窗格" : "显示导航窗格", true, false},
-        {CMD_NONE, "", false, true},
-        {CMD_BACK, "后退", histPos > 0, false},
-        {CMD_FORWARD, "前进", histPos + 1 < (int)history.size(), false},
-        {CMD_UP, "上一级", current != current.root_path(), false},
-        {CMD_NONE, "", false, true},
-        {CMD_SORT_NAME, sortLabel("名称", SortKey::Name), true, false},
-        {CMD_SORT_DATE, sortLabel("日期", SortKey::Date), true, false},
-        {CMD_SORT_TYPE, sortLabel("类型", SortKey::Type), true, false},
-        {CMD_SORT_SIZE, sortLabel("大小", SortKey::Size), true, false},
-        {CMD_NONE, "", false, true},
-        {CMD_HELP, "帮助", true, false},
-        {CMD_QUIT, "退出", true, false},
+    bool trash = inTrash();
+    std::vector<MenuItem> items;
+    auto add = [&](Cmd cmd, const std::string& label, bool enabled, bool sep = false) {
+        items.push_back({cmd, label, enabled, sep});
     };
+    add(CMD_OPEN, "打开", has);
+    add(CMD_NONE, "", false, true);
+    if (trash) {
+        add(CMD_RESTORE, "还原", has);
+        add(CMD_DELETE, "永久删除", has);
+        add(CMD_EMPTY_TRASH, "清空回收站", true);
+        add(CMD_PROPERTIES, "属性", has);
+        add(CMD_NONE, "", false, true);
+        add(CMD_REFRESH, "刷新", true);
+        add(CMD_SELECTALL, "全选", has);
+        add(CMD_TOGGLEHIDDEN, showHidden ? "隐藏隐藏项目" : "显示隐藏项目", true);
+        add(CMD_TOGGLESIDEBAR, showSidebar ? "隐藏导航窗格" : "显示导航窗格", true);
+    } else {
+        add(CMD_COPY, "复制", has);
+        add(CMD_CUT, "剪切", has);
+        add(CMD_PASTE, "粘贴", !clipboard.empty());
+        add(CMD_RENAME, "重命名", has);
+        add(CMD_DELETE, "删除", has);
+        add(CMD_PROPERTIES, "属性", has);
+        add(CMD_NONE, "", false, true);
+        add(CMD_NEWFOLDER, "新建文件夹", true);
+        add(CMD_REFRESH, "刷新", true);
+        add(CMD_SELECTALL, "全选", has);
+        add(CMD_TOGGLEHIDDEN, showHidden ? "隐藏隐藏项目" : "显示隐藏项目", true);
+        add(CMD_TOGGLESIDEBAR, showSidebar ? "隐藏导航窗格" : "显示导航窗格", true);
+    }
+    add(CMD_NONE, "", false, true);
+    add(CMD_BACK, "后退", histPos > 0);
+    add(CMD_FORWARD, "前进", histPos + 1 < (int)history.size());
+    add(CMD_UP, "上一级", current != current.root_path());
+    add(CMD_NONE, "", false, true);
+    add(CMD_SORT_NAME, sortLabel("名称", SortKey::Name), true);
+    add(CMD_SORT_DATE, sortLabel("日期", SortKey::Date), true);
+    add(CMD_SORT_TYPE, sortLabel("类型", SortKey::Type), true);
+    add(CMD_SORT_SIZE, sortLabel("大小", SortKey::Size), true);
+    add(CMD_NONE, "", false, true);
+    add(CMD_HELP, "帮助", true);
+    add(CMD_QUIT, "退出", true);
     if (px < 0)
         px = listX + 2;
     if (py < 0)
