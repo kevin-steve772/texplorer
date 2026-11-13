@@ -610,6 +610,7 @@ private:
     std::vector<TabState> tabs;
     int activeTab = 0;
     std::vector<Btn> tabButtons;
+    std::vector<Btn> tabCloseButtons;
     Rect newTabRect, closeAppRect;
     std::vector<Rect> crumbRects;
     std::vector<fs::path> crumbPaths;
@@ -953,6 +954,7 @@ void App::closeTab(int idx) {
 
 void App::drawTabs() {
     tabButtons.clear();
+    tabCloseButtons.clear();
     newTabRect = Rect{};
     closeAppRect = Rect{toolbarY, COLS - 3, 1, 3};
     wput(stdscr, toolbarY, 0, COLS, "", attrChrome);
@@ -967,7 +969,7 @@ void App::drawTabs() {
         name = utf8Clip(sanitize(name), 20);
         std::string lab = " " + name + " ";
         labels.push_back(lab);
-        widths.push_back(utf8Cols(lab));
+        widths.push_back(utf8Cols(lab) + 2);
     }
 
     int first = activeTab;
@@ -989,8 +991,11 @@ void App::drawTabs() {
         if (x + widths[i] > limit)
             break;
         int attr = (i == activeTab) ? (attrSel | A_BOLD) : attrChrome;
-        wput(stdscr, toolbarY, x, widths[i], labels[i], attr);
+        int lw = utf8Cols(labels[i]);
+        wput(stdscr, toolbarY, x, lw, labels[i], attr);
+        wput(stdscr, toolbarY, x + lw, 2, "× ", attr);
         tabButtons.push_back(Btn{Rect{toolbarY, x, 1, widths[i]}, i});
+        tabCloseButtons.push_back(Btn{Rect{toolbarY, x + lw, 1, 2}, i});
         x += widths[i];
         if (i + 1 < (int)tabs.size() && x < limit) {
             wput(stdscr, toolbarY, x, 1, "│", attrChrome | A_DIM);
@@ -2012,7 +2017,7 @@ void App::showProperties() {
 void App::showHelp() {
     infoDialog("帮助", {
                            "动作菜单：选中文件后按 a 打开（右键也可），包含全部操作。",
-                           "标签页：Ctrl+T 新建，Ctrl+W 关闭，Ctrl+Tab 切换；点击标签切换，中键关闭。",
+                           "标签页：Ctrl+T 新建，Ctrl+W 关闭，Ctrl+Tab 切换；点击标签切换，点击标签上的 × 或中键关闭。",
                            "地址栏左侧为后退/前进/上级；右上角 × 退出程序。",
                            "鼠标：单击选择，双击打开，滚轮滚动。",
                            "键盘：↑↓ 移动，Enter 打开，Backspace 后退。",
@@ -2097,6 +2102,12 @@ void App::handleMouse() {
         return;
     }
     if (left && y == toolbarY) {
+        for (const auto& b : tabCloseButtons) {
+            if (b.r.contains(y, x)) {
+                closeTab(b.id);
+                return;
+            }
+        }
         for (const auto& b : tabButtons) {
             if (b.r.contains(y, x)) {
                 switchTab(b.id);
