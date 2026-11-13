@@ -597,7 +597,7 @@ private:
     std::chrono::steady_clock::time_point lastRightTime;
 
     int toolbarY = 0, addrY = 1, contentTop = 2, contentBottom = 0;
-    int statusY = 0, hintsY = 0;
+    int statusY = 0;
     int sidebarW = 0;
     int listX = 0, listW = 0;
     int headerY = 0, rowsTop = 0, rowsBottom = 0, visibleRows = 0;
@@ -631,7 +631,6 @@ private:
     void drawSidebar();
     void drawList();
     void drawStatus();
-    void drawHints();
 
     void refresh();
     void sortEntries();
@@ -808,9 +807,8 @@ void App::computeLayout() {
     toolbarY = 0;
     addrY = 1;
     contentTop = 2;
-    statusY = H - 2;
-    hintsY = H - 1;
-    contentBottom = H - 3;
+    statusY = H - 1;
+    contentBottom = H - 2;
 
     sidebarW = (showSidebar && W >= 72) ? 26 : 0;
     listX = sidebarW ? sidebarW + 1 : 0;
@@ -859,8 +857,6 @@ void App::draw() {
     if (COLS < 40 || LINES < 10) {
         std::string m = "终端窗口太小，请调整大小";
         wput(stdscr, LINES / 2, 0, COLS, centerCols(m, COLS), A_BOLD);
-        std::string h = "F10 退出";
-        wput(stdscr, LINES - 1, 0, COLS, centerCols(h, COLS), A_DIM);
         wrefresh(stdscr);
         return;
     }
@@ -870,7 +866,6 @@ void App::draw() {
     drawSidebar();
     drawList();
     drawStatus();
-    drawHints();
 
     wrefresh(stdscr);
 }
@@ -1243,13 +1238,6 @@ void App::drawStatus() {
     int lw = (rx > 1 ? rx - 2 : COLS - 2);
     if (lw > 0)
         wput(stdscr, statusY, 1, lw, left, attrChrome);
-}
-
-void App::drawHints() {
-    std::string h =
-        "a 动作  Ctrl+T 新标签  Ctrl+W 关闭标签  Ctrl+Tab 切换  F1 帮助  "
-        "F2 重命名  F5 刷新  F7 新建  F9 隐藏  Del 删除  F10 退出";
-    wput(stdscr, hintsY, 1, COLS - 1, h, A_DIM);
 }
 
 void App::sortEntries() {
@@ -2016,18 +2004,20 @@ void App::showProperties() {
 
 void App::showHelp() {
     infoDialog("帮助", {
-                           "动作菜单：选中文件后按 a 打开（右键也可），包含全部操作。",
-                           "标签页：Ctrl+T 新建，Ctrl+W 关闭，Ctrl+Tab 切换；点击标签切换，点击标签上的 × 或中键关闭。",
-                           "地址栏左侧为后退/前进/上级；右上角 × 退出程序。",
-                           "鼠标：单击选择，双击打开，滚轮滚动。",
-                           "键盘：↑↓ 移动，Enter 打开，Backspace 后退。",
-                           "打开：普通文件用 nano 编辑，可执行文件直接运行。",
-                           "删除会移入左侧“回收站”；在回收站中可还原或永久删除。",
-                           "F2 重命名，F4 属性，F5 刷新，F7 新建文件夹。",
-                           "F9 显示隐藏项目，F10 退出。",
-                           "Ctrl+C 复制，Ctrl+X 剪切，Ctrl+V 粘贴。",
-                           "Ctrl+A 全选，Ctrl+U 上一级，Ctrl+B 显示/隐藏导航窗格。",
-                           "Shift+单击 连续选择，Ctrl+单击 多选。",
+                           "动作菜单：按 a 或右键打开；右上角 × 退出程序。",
+                           "标签页：Ctrl+T 新建，Ctrl+W 关闭，Tab / Ctrl+Tab 下一个，Shift+Tab 上一个。",
+                           "标签操作：点击标签切换，点击标签上的 × 或中键关闭。",
+                           "导航：↑↓ 移动，PgUp/PgDn 翻页，Home/End 首尾，Enter 打开。",
+                           "导航：Backspace 后退，Ctrl+U 上一级，Ctrl+B 显示/隐藏侧栏。",
+                           "地址栏：‹ 后退，› 前进，↑ 上一级；点击面包屑跳转。",
+                           "文件：F1 帮助，F2 重命名，F4 属性，F5 刷新，F7 新建文件夹。",
+                           "文件：Del 删除，F9 显示隐藏，F10 退出。",
+                           "编辑：Ctrl+C 复制，Ctrl+X 剪切，Ctrl+V 粘贴，Ctrl+A 全选。",
+                           "鼠标：单击选择，双击打开，滚轮滚动，右键菜单。",
+                           "多选：Shift+单击 连续，Ctrl+单击 多选。",
+                           "打开：普通文件用 nano，可执行文件直接运行。",
+                           "回收站：删除的项目移入左侧回收站；在其中可还原或永久删除。",
+                           "Esc 清除状态；直接输入文件名前缀可快速定位。",
                        });
 }
 
