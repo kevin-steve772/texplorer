@@ -585,6 +585,7 @@ private:
     uintmax_t freeBytes = 0;
     bool freeOk = false;
     int attrSel = A_REVERSE;
+    int attrChrome = A_REVERSE;
 
     std::vector<Quick> quickItems;
 
@@ -698,10 +699,18 @@ void App::run() {
     if (has_colors()) {
         start_color();
         use_default_colors();
-        init_pair(1, COLOR_BLACK, COLOR_CYAN);
+        if (COLORS >= 256) {
+            init_pair(1, 255, 239);
+            init_pair(2, 252, 236);
+        } else {
+            init_pair(1, COLOR_WHITE, COLOR_BLACK);
+            init_pair(2, COLOR_WHITE, COLOR_BLACK);
+        }
         attrSel = COLOR_PAIR(1);
+        attrChrome = COLOR_PAIR(2);
     } else {
         attrSel = A_REVERSE;
+        attrChrome = A_REVERSE;
     }
     mousemask(ALL_MOUSE_EVENTS, nullptr);
     mouseinterval(0);
@@ -946,7 +955,8 @@ void App::drawTabs() {
     tabButtons.clear();
     newTabRect = Rect{};
     closeAppRect = Rect{toolbarY, COLS - 3, 1, 3};
-    wput(stdscr, toolbarY, COLS - 3, 3, " × ", A_REVERSE | A_BOLD);
+    wput(stdscr, toolbarY, 0, COLS, "", attrChrome);
+    wput(stdscr, toolbarY, COLS - 3, 3, " × ", attrChrome | A_BOLD);
 
     int limit = std::max(0, COLS - 4);
     std::vector<std::string> labels;
@@ -978,23 +988,23 @@ void App::drawTabs() {
     for (int i = first; i < (int)tabs.size(); ++i) {
         if (x + widths[i] > limit)
             break;
-        int attr = (i == activeTab) ? (attrSel | A_BOLD) : A_DIM;
+        int attr = (i == activeTab) ? (attrSel | A_BOLD) : attrChrome;
         wput(stdscr, toolbarY, x, widths[i], labels[i], attr);
         tabButtons.push_back(Btn{Rect{toolbarY, x, 1, widths[i]}, i});
         x += widths[i];
         if (i + 1 < (int)tabs.size() && x < limit) {
-            wput(stdscr, toolbarY, x, 1, "│", A_DIM);
+            wput(stdscr, toolbarY, x, 1, "│", attrChrome | A_DIM);
             ++x;
         }
     }
     if (x + 3 <= limit) {
-        wput(stdscr, toolbarY, x, 3, " + ", A_BOLD);
+        wput(stdscr, toolbarY, x, 3, " + ", attrChrome | A_BOLD);
         newTabRect = Rect{toolbarY, x, 1, 3};
     }
 }
 
 void App::drawAddress() {
-    wput(stdscr, addrY, 0, COLS, "", A_REVERSE);
+    wput(stdscr, addrY, 0, COLS, "", attrChrome);
 
     toolbarButtons.clear();
     struct Def {
@@ -1013,7 +1023,7 @@ void App::drawAddress() {
         int w = utf8Cols(label);
         if (x + w >= COLS - 1)
             break;
-        int attr = d.enabled ? (attrSel | A_BOLD) : (A_REVERSE | A_DIM);
+        int attr = d.enabled ? (attrSel | A_BOLD) : (attrChrome | A_DIM);
         wput(stdscr, addrY, x, w, label, attr);
         toolbarButtons.push_back(Btn{Rect{addrY, x, 1, w}, d.id});
         x += w + 1;
@@ -1026,7 +1036,7 @@ void App::drawAddress() {
         std::string lab = "🗑 回收站";
         int lw = utf8Cols(lab);
         if (startX + lw <= COLS - 1) {
-            wput(stdscr, addrY, startX, lw, lab, A_REVERSE | A_BOLD);
+            wput(stdscr, addrY, startX, lw, lab, attrChrome | A_BOLD);
             crumbRects.push_back(Rect{addrY, startX, 1, lw});
             crumbPaths.push_back(trashFiles);
         }
@@ -1086,20 +1096,20 @@ void App::drawAddress() {
     crumbPaths.clear();
     x = startX;
     if (ell) {
-        wput(stdscr, addrY, x, ellW, "… › ", A_REVERSE | A_DIM);
+        wput(stdscr, addrY, x, ellW, "… › ", attrChrome | A_DIM);
         x += ellW;
     }
     bool first = true;
     for (int i : idx) {
         if (!first) {
-            wput(stdscr, addrY, x, sepW, " › ", A_REVERSE | A_DIM);
+            wput(stdscr, addrY, x, sepW, " › ", attrChrome | A_DIM);
             x += sepW;
         }
         std::string lab = labels[i];
         int lw = utf8Cols(lab);
         if (x + lw > COLS - 1)
             break;
-        wput(stdscr, addrY, x, lw, lab, A_REVERSE | A_BOLD);
+        wput(stdscr, addrY, x, lw, lab, attrChrome | A_BOLD);
         crumbRects.push_back(Rect{addrY, x, 1, lw});
         crumbPaths.push_back(chain[i]);
         x += lw;
@@ -1122,7 +1132,7 @@ void App::drawSidebar() {
             break;
         const Quick& q = quickItems[i];
         bool active = samePath(current, q.path);
-        int attr = active ? attrSel : 0;
+        int attr = active ? (attrSel | A_BOLD) : 0;
         std::string text = "  " + q.icon + "  " + q.label;
         wput(stdscr, y, 0, sidebarW, text, attr);
         sidebarRects.push_back(Rect{y, 0, 1, sidebarW});
@@ -1135,7 +1145,7 @@ void App::drawSidebar() {
 }
 
 void App::drawList() {
-    wput(stdscr, headerY, listX, listW, "", A_REVERSE);
+    wput(stdscr, headerY, listX, listW, "", attrChrome);
     auto mark = [&](SortKey k) -> std::string {
         if (sortKey != k)
             return "";
@@ -1143,16 +1153,16 @@ void App::drawList() {
     };
     if (colNameW > 0)
         wput(stdscr, headerY, colNameX, colNameW, "名称" + mark(SortKey::Name),
-             A_REVERSE | A_BOLD);
+             attrChrome | A_BOLD);
     if (colDateW > 0)
         wput(stdscr, headerY, colDateX, colDateW, "修改日期" + mark(SortKey::Date),
-             A_REVERSE | A_BOLD);
+             attrChrome | A_BOLD);
     if (colTypeW > 0)
         wput(stdscr, headerY, colTypeX, colTypeW, "类型" + mark(SortKey::Type),
-             A_REVERSE | A_BOLD);
+             attrChrome | A_BOLD);
     if (colSizeW > 0)
         wput(stdscr, headerY, colSizeX, colSizeW, fitRight("大小" + mark(SortKey::Size), colSizeW - 1),
-             A_REVERSE | A_BOLD);
+             attrChrome | A_BOLD);
 
     if (visibleRows <= 0)
         return;
@@ -1171,15 +1181,12 @@ void App::drawList() {
         const Entry& e = entries[i];
         bool sel = selected.count(e.name) > 0;
         bool cur = (i == cursor);
-        int base = sel ? attrSel : 0;
+        bool highlight = sel || cur;
+        int base = highlight ? attrSel : 0;
         int nameAttr = base;
-        if (!sel) {
-            if (cur)
-                nameAttr |= A_UNDERLINE;
-            if (e.isDir)
-                nameAttr |= A_BOLD;
-        }
-        int metaAttr = sel ? base : A_DIM;
+        if (e.isDir || cur)
+            nameAttr |= A_BOLD;
+        int metaAttr = highlight ? base : A_DIM;
 
         std::string icon = e.isLink ? ICON_LINK : (e.isDir ? ICON_DIR : ICON_FILE);
         std::string nameText = icon + " " + sanitize(e.name);
@@ -1196,7 +1203,7 @@ void App::drawList() {
 }
 
 void App::drawStatus() {
-    wput(stdscr, statusY, 0, COLS, "", A_REVERSE);
+    wput(stdscr, statusY, 0, COLS, "", attrChrome);
 
     std::string left;
     if (!statusMessage.empty()) {
@@ -1226,11 +1233,11 @@ void App::drawStatus() {
     int rw = utf8Cols(right);
     int rx = COLS - rw - 1;
     if (rx > 1)
-        wput(stdscr, statusY, rx, rw, right, A_REVERSE | A_DIM);
+        wput(stdscr, statusY, rx, rw, right, attrChrome | A_DIM);
 
     int lw = (rx > 1 ? rx - 2 : COLS - 2);
     if (lw > 0)
-        wput(stdscr, statusY, 1, lw, left, A_REVERSE);
+        wput(stdscr, statusY, 1, lw, left, attrChrome);
 }
 
 void App::drawHints() {
@@ -2806,7 +2813,7 @@ App::Cmd App::popupMenu(const std::vector<MenuItem>& items, int px, int py) {
             if (!items[ai].enabled)
                 attr |= A_DIM;
             if (ai == focus)
-                attr |= A_REVERSE;
+                attr = attrSel | A_BOLD;
             wput(win, 1 + i, 1, w - 2, "  " + items[ai].label, attr);
         }
         if (top > 0)
