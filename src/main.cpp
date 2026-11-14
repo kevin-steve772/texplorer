@@ -482,13 +482,15 @@ static int dlgButtonW(const std::string& label) {
     return utf8Cols(label) + 4;
 }
 
-static void drawDlgButton(WINDOW* win, int y, int x, const std::string& label, bool primary) {
+static void drawDlgButton(WINDOW* win, int y, int x, const std::string& label,
+                          bool primary, bool hovered, int attrHover, int attrSelHover) {
     std::string s = "[ " + label + " ]";
+    int attr = 0;
     if (primary)
-        wattron(win, A_REVERSE);
-    mvwaddstr(win, y, x, s.c_str());
-    if (primary)
-        wattroff(win, A_REVERSE);
+        attr = hovered ? (attrSelHover | A_BOLD) : A_REVERSE;
+    else if (hovered)
+        attr = attrHover | A_BOLD;
+    wput(win, y, x, utf8Cols(s), s, attr);
 }
 
 class App {
@@ -546,6 +548,7 @@ private:
     struct Btn {
         Rect r;
         int id = 0;
+        bool enabled = true;
     };
 
     struct TabState {
@@ -596,6 +599,10 @@ private:
     bool freeOk = false;
     int attrSel = A_REVERSE;
     int attrChrome = A_REVERSE;
+    int attrHover = A_BOLD;
+    int attrSelHover = A_REVERSE | A_BOLD;
+    int mouseX = -1, mouseY = -1;
+    bool mouseValid = false;
 
     std::vector<Quick> quickItems;
 
@@ -643,6 +650,8 @@ private:
     void newTab();
     void closeTab(int idx);
     void computeLayout();
+    int hoverSignature(int x, int y) const;
+    bool mouseHover() const { return mouseValid && !scrollbarDragging; }
     void draw();
     void drawTabs();
     void drawAddress();
@@ -722,15 +731,25 @@ void App::run() {
         if (COLORS >= 256) {
             init_pair(1, 255, 239);
             init_pair(2, 252, 236);
+            init_pair(3, 255, 237);
+            init_pair(4, 255, 240);
+            attrSel = COLOR_PAIR(1);
+            attrChrome = COLOR_PAIR(2);
+            attrHover = COLOR_PAIR(3);
+            attrSelHover = COLOR_PAIR(4);
         } else {
             init_pair(1, COLOR_WHITE, COLOR_BLACK);
             init_pair(2, COLOR_WHITE, COLOR_BLACK);
+            attrSel = COLOR_PAIR(1);
+            attrChrome = COLOR_PAIR(2);
+            attrHover = A_BOLD;
+            attrSelHover = A_REVERSE | A_BOLD;
         }
-        attrSel = COLOR_PAIR(1);
-        attrChrome = COLOR_PAIR(2);
     } else {
         attrSel = A_REVERSE;
         attrChrome = A_REVERSE;
+        attrHover = A_BOLD;
+        attrSelHover = A_REVERSE | A_BOLD;
     }
     mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, nullptr);
     mouseinterval(0);
@@ -873,6 +892,55 @@ void App::computeLayout() {
     headerSizeR = Rect{headerY, colSizeX, 1, colSizeW};
 }
 
+int App::hoverSignature(int x, int y) const {
+    if (closeAppRect.contains(y, x))
+        return 1;
+    if (y == toolbarY) {
+        for (const auto& b : tabCloseButtons)
+            if (b.r.contains(y, x))
+                return 10000 + b.id;
+        for (const auto& b : tabButtons)
+            if (b.r.contains(y, x))
+                return 20000 + b.id;
+        if (newTabRect.contains(y, x))
+            return 3;
+        return 0;
+    }
+    if (y == addrY) {
+        for (const auto& b : toolbarButtons)
+            if (b.enabled && b.r.contains(y, x))
+                return 30000 + b.id;
+        for (size_t i = 0; i < crumbRects.size(); ++i)
+            if (crumbRects[i].contains(y, x))
+                return 40000 + (int)i;
+        return 0;
+    }
+    if (y == headerY) {
+        if (headerNameR.contains(y, x))
+            return 50001;
+        if (headerDateR.contains(y, x))
+            return 50002;
+        if (headerTypeR.contains(y, x))
+            return 50003;
+        if (headerSizeR.contains(y, x))
+            return 50004;
+        return 0;
+    }
+    for (size_t i = 0; i < sidebarRects.size(); ++i)
+        if (sidebarRects[i].contains(y, x))
+            return 80000 + (int)i;
+    if (y >= rowsTop && y <= rowsBottom) {
+        if (scrollbarVisible && x >= COLS - 2)
+            return 60000;
+        if (x >= listX && x < listX + listW) {
+            int idx = scroll + (y - rowsTop);
+            if (idx >= 0 && idx < (int)entries.size())
+                return 70000 + idx;
+        }
+    }
+    return 0;
+}
+
 void App::draw() {
     computeLayout();
     erase();
@@ -977,7 +1045,9 @@ void App::drawTabs() {
     newTabRect = Rect{};
     closeAppRect = Rect{toolbarY, COLS - 3, 1, 3};
     wput(stdscr, toolbarY, 0, COLS, "", attrChrome);
-    wput(stdscr, toolbarY, COLS - 3, 3, " × ", attrChrome | A_BOLD);
+    bool closeAppHover = mouseHover() && closeAppRect.contains(mouseY, mouseX);
+    wput(stdscr, toolbarY, COLS - 3, 3, " × ",
+         closeAppHover ? (attrHover | A_BOLD) : (attrChrome | A_BOLD));
 
     int limit = std::max(0, COLS - 4);
     std::vector<std::string> labels;
@@ -1009,12 +1079,22 @@ void App::drawTabs() {
     for (int i = first; i < (int)tabs.size(); ++i) {
         if (x + widths[i] > limit)
             break;
-        int attr = (i == activeTab) ? (attrSel | A_BOLD) : attrChrome;
         int lw = utf8Cols(labels[i]);
+        Rect tabR{toolbarY, x, 1, widths[i]};
+        Rect closeR{toolbarY, x + lw, 1, 2};
+        bool closeHover = mouseHover() && closeR.contains(mouseY, mouseX);
+        bool tabHover = !closeHover && mouseHover() && tabR.contains(mouseY, mouseX);
+        int attr = (i == activeTab) ? (attrSel | A_BOLD) : attrChrome;
+        if (tabHover || closeHover)
+            attr = (i == activeTab) ? (attrSelHover | A_BOLD) : attrHover;
+        int closeAttr = closeHover
+                            ? ((i == activeTab) ? (attrSelHover | A_BOLD)
+                                               : (attrHover | A_BOLD))
+                            : attr;
         wput(stdscr, toolbarY, x, lw, labels[i], attr);
-        wput(stdscr, toolbarY, x + lw, 2, "× ", attr);
-        tabButtons.push_back(Btn{Rect{toolbarY, x, 1, widths[i]}, i});
-        tabCloseButtons.push_back(Btn{Rect{toolbarY, x + lw, 1, 2}, i});
+        wput(stdscr, toolbarY, x + lw, 2, "× ", closeAttr);
+        tabButtons.push_back(Btn{tabR, i});
+        tabCloseButtons.push_back(Btn{closeR, i});
         x += widths[i];
         if (i + 1 < (int)tabs.size() && x < limit) {
             wput(stdscr, toolbarY, x, 1, "│", attrChrome | A_DIM);
@@ -1022,8 +1102,11 @@ void App::drawTabs() {
         }
     }
     if (x + 3 <= limit) {
-        wput(stdscr, toolbarY, x, 3, " + ", attrChrome | A_BOLD);
-        newTabRect = Rect{toolbarY, x, 1, 3};
+        Rect nr{toolbarY, x, 1, 3};
+        bool hov = mouseHover() && nr.contains(mouseY, mouseX);
+        wput(stdscr, toolbarY, x, 3, " + ",
+             hov ? (attrHover | A_BOLD) : (attrChrome | A_BOLD));
+        newTabRect = nr;
     }
 }
 
@@ -1047,9 +1130,12 @@ void App::drawAddress() {
         int w = utf8Cols(label);
         if (x + w >= COLS - 1)
             break;
-        int attr = d.enabled ? (attrSel | A_BOLD) : (attrChrome | A_DIM);
+        Rect r{addrY, x, 1, w};
+        bool hov = d.enabled && mouseHover() && r.contains(mouseY, mouseX);
+        int attr = d.enabled ? ((hov ? attrSelHover : attrSel) | A_BOLD)
+                             : (attrChrome | A_DIM);
         wput(stdscr, addrY, x, w, label, attr);
-        toolbarButtons.push_back(Btn{Rect{addrY, x, 1, w}, d.id});
+        toolbarButtons.push_back(Btn{r, d.id, d.enabled});
         x += w + 1;
     }
     int startX = x;
@@ -1060,8 +1146,11 @@ void App::drawAddress() {
         std::string lab = "🗑 回收站";
         int lw = utf8Cols(lab);
         if (startX + lw <= COLS - 1) {
-            wput(stdscr, addrY, startX, lw, lab, attrChrome | A_BOLD);
-            crumbRects.push_back(Rect{addrY, startX, 1, lw});
+            Rect r{addrY, startX, 1, lw};
+            bool hov = mouseHover() && r.contains(mouseY, mouseX);
+            wput(stdscr, addrY, startX, lw, lab,
+                 hov ? (attrHover | A_BOLD) : (attrChrome | A_BOLD));
+            crumbRects.push_back(r);
             crumbPaths.push_back(trashFiles);
         }
         return;
@@ -1133,8 +1222,11 @@ void App::drawAddress() {
         int lw = utf8Cols(lab);
         if (x + lw > COLS - 1)
             break;
-        wput(stdscr, addrY, x, lw, lab, attrChrome | A_BOLD);
-        crumbRects.push_back(Rect{addrY, x, 1, lw});
+        Rect r{addrY, x, 1, lw};
+        bool hov = mouseHover() && r.contains(mouseY, mouseX);
+        wput(stdscr, addrY, x, lw, lab,
+             hov ? (attrHover | A_BOLD) : (attrChrome | A_BOLD));
+        crumbRects.push_back(r);
         crumbPaths.push_back(chain[i]);
         x += lw;
         first = false;
@@ -1156,10 +1248,16 @@ void App::drawSidebar() {
             break;
         const Quick& q = quickItems[i];
         bool active = samePath(current, q.path);
-        int attr = active ? (attrSel | A_BOLD) : 0;
+        Rect r{y, 0, 1, sidebarW};
+        bool hov = mouseHover() && r.contains(mouseY, mouseX);
+        int attr;
+        if (active)
+            attr = (hov ? attrSelHover : attrSel) | A_BOLD;
+        else
+            attr = hov ? attrHover : 0;
         std::string text = "  " + q.icon + "  " + q.label;
         wput(stdscr, y, 0, sidebarW, text, attr);
-        sidebarRects.push_back(Rect{y, 0, 1, sidebarW});
+        sidebarRects.push_back(r);
         sidebarIndex.push_back((int)i);
         y++;
     }
@@ -1175,18 +1273,35 @@ void App::drawList() {
             return "";
         return sortAsc ? " ↑" : " ↓";
     };
-    if (colNameW > 0)
+    bool hovName = mouseHover() && headerNameR.contains(mouseY, mouseX);
+    bool hovDate = mouseHover() && headerDateR.contains(mouseY, mouseX);
+    bool hovType = mouseHover() && headerTypeR.contains(mouseY, mouseX);
+    bool hovSize = mouseHover() && headerSizeR.contains(mouseY, mouseX);
+    if (colNameW > 0) {
+        if (hovName)
+            wput(stdscr, headerY, colNameX, colNameW, "", attrHover);
         wput(stdscr, headerY, colNameX, colNameW, "名称" + mark(SortKey::Name),
-             attrChrome | A_BOLD);
-    if (colDateW > 0)
+             hovName ? (attrHover | A_BOLD) : (attrChrome | A_BOLD));
+    }
+    if (colDateW > 0) {
+        if (hovDate)
+            wput(stdscr, headerY, colDateX, colDateW, "", attrHover);
         wput(stdscr, headerY, colDateX, colDateW, "修改日期" + mark(SortKey::Date),
-             attrChrome | A_BOLD);
-    if (colTypeW > 0)
+             hovDate ? (attrHover | A_BOLD) : (attrChrome | A_BOLD));
+    }
+    if (colTypeW > 0) {
+        if (hovType)
+            wput(stdscr, headerY, colTypeX, colTypeW, "", attrHover);
         wput(stdscr, headerY, colTypeX, colTypeW, "类型" + mark(SortKey::Type),
-             attrChrome | A_BOLD);
-    if (colSizeW > 0)
-        wput(stdscr, headerY, colSizeX, colSizeW, fitRight("大小" + mark(SortKey::Size), colSizeW - 1),
-             attrChrome | A_BOLD);
+             hovType ? (attrHover | A_BOLD) : (attrChrome | A_BOLD));
+    }
+    if (colSizeW > 0) {
+        if (hovSize)
+            wput(stdscr, headerY, colSizeX, colSizeW, "", attrHover);
+        wput(stdscr, headerY, colSizeX, colSizeW,
+             fitRight("大小" + mark(SortKey::Size), colSizeW - 1),
+             hovSize ? (attrHover | A_BOLD) : (attrChrome | A_BOLD));
+    }
 
     if (visibleRows <= 0)
         return;
@@ -1195,6 +1310,16 @@ void App::drawList() {
         std::string msg = "此文件夹为空";
         wput(stdscr, rowsTop, listX, listW, centerCols(msg, listW), A_DIM);
         return;
+    }
+
+    bool scrollable = visibleRows > 0 && (int)entries.size() > visibleRows;
+    int hoverIdx = -1;
+    if (mouseHover() && mouseY >= rowsTop && mouseY <= rowsBottom &&
+        mouseX >= listX && mouseX < listX + listW &&
+        !(scrollable && mouseX >= COLS - 2)) {
+        int idx = scroll + (mouseY - rowsTop);
+        if (idx >= 0 && idx < (int)entries.size())
+            hoverIdx = idx;
     }
 
     for (int r = 0; r < visibleRows; ++r) {
@@ -1206,11 +1331,15 @@ void App::drawList() {
         bool sel = selected.count(e.name) > 0;
         bool cur = (i == cursor);
         bool highlight = sel || cur;
-        int base = highlight ? attrSel : 0;
+        bool hovered = (i == hoverIdx);
+        int base = highlight ? (hovered ? attrSelHover : attrSel)
+                             : (hovered ? attrHover : 0);
+        if (hovered)
+            wput(stdscr, y, listX, listW, "", base);
         int nameAttr = base;
         if (e.isDir || cur)
             nameAttr |= A_BOLD;
-        int metaAttr = highlight ? base : A_DIM;
+        int metaAttr = (highlight || hovered) ? base : A_DIM;
 
         std::string icon = e.isLink ? ICON_LINK : (e.isDir ? ICON_DIR : ICON_FILE);
         std::string nameText = icon + " " + sanitize(e.name);
@@ -1273,8 +1402,9 @@ void App::drawScrollbar() {
     if (trackH > thumbH)
         thumbTop += (int)((long long)(trackH - thumbH) * pos / maxScroll);
 
+    int thumbAttr = active ? (attrHover | A_BOLD) : (attrChrome | A_BOLD);
     for (int y = thumbTop; y < thumbTop + thumbH; ++y)
-        wput(stdscr, y, x0, 1, active ? "┃" : "⏐", attrChrome | A_BOLD);
+        wput(stdscr, y, x0, 1, active ? "┃" : "⏐", thumbAttr);
     scrollThumbRect = Rect{thumbTop, x0, thumbH, 1};
     scrollTrackRect = Rect{trackTop, x0, trackH, 1};
 }
@@ -2110,6 +2240,11 @@ void App::handleMouse() {
         return;
     int x = ev.x;
     int y = ev.y;
+    int oldSig = mouseValid ? hoverSignature(mouseX, mouseY) : 0;
+    mouseX = x;
+    mouseY = y;
+    mouseValid = true;
+    bool hoverChanged = (oldSig != hoverSignature(x, y));
     bool inScrollArea = scrollbarVisible && y >= rowsTop && y <= rowsBottom &&
                         x >= COLS - 2;
 
@@ -2155,9 +2290,9 @@ void App::handleMouse() {
     }
 
     if (ev.bstate & REPORT_MOUSE_POSITION) {
-        if (inScrollArea == scrollbarHover)
-            skipDraw = true;
         scrollbarHover = inScrollArea;
+        if (!hoverChanged)
+            skipDraw = true;
         return;
     }
 
@@ -2637,6 +2772,8 @@ int App::showDialog(const std::string& title, const std::vector<std::string>& ra
     keypad(win, TRUE);
     int focus = std::clamp(defaultIdx, 0, (int)buttons.size() - 1);
     int ret = -1;
+    int mouseY = -1, mouseX = -1;
+    bool mouseValid = false;
 
     while (ret < 0) {
         werase(win);
@@ -2658,9 +2795,20 @@ int App::showDialog(const std::string& title, const std::vector<std::string>& ra
             int bw = dlgButtonW(buttons[i]);
             bxs.push_back(bx);
             bws.push_back(bw);
-            drawDlgButton(win, by, bx, buttons[i], (int)i == focus);
             bx += bw + 2;
         }
+        int hoverBtn = -1;
+        if (mouseValid && mouseY == by) {
+            for (size_t i = 0; i < buttons.size(); ++i) {
+                if (mouseX >= bxs[i] && mouseX < bxs[i] + bws[i]) {
+                    hoverBtn = (int)i;
+                    break;
+                }
+            }
+        }
+        for (size_t i = 0; i < buttons.size(); ++i)
+            drawDlgButton(win, by, bxs[i], buttons[i], (int)i == focus,
+                          hoverBtn == (int)i, attrHover, attrSelHover);
         wrefresh(win);
 
         wint_t wc = 0;
@@ -2670,14 +2818,19 @@ int App::showDialog(const std::string& title, const std::vector<std::string>& ra
         if (r == KEY_CODE_YES) {
             if (wc == KEY_MOUSE) {
                 MEVENT ev;
-                if (getmouse(&ev) == OK &&
-                    (ev.bstate & (BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED))) {
-                    int ly = ev.y - y;
-                    int lx = ev.x - x;
-                    for (size_t i = 0; i < buttons.size(); ++i) {
-                        if (ly == by && lx >= bxs[i] && lx < bxs[i] + bws[i]) {
-                            ret = (int)i;
-                            break;
+                if (getmouse(&ev) == OK) {
+                    if (ev.bstate & REPORT_MOUSE_POSITION) {
+                        mouseValid = true;
+                        mouseY = ev.y - y;
+                        mouseX = ev.x - x;
+                    } else if (ev.bstate & (BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED)) {
+                        int ly = ev.y - y;
+                        int lx = ev.x - x;
+                        for (size_t i = 0; i < buttons.size(); ++i) {
+                            if (ly == by && lx >= bxs[i] && lx < bxs[i] + bws[i]) {
+                                ret = (int)i;
+                                break;
+                            }
                         }
                     }
                 }
@@ -2746,6 +2899,8 @@ bool App::inputDialog(const std::string& title, const std::string& label, std::s
     int btnY = 6;
     bool ok = false;
     bool cancel = false;
+    int mouseY = -1, mouseX = -1;
+    bool mouseValid = false;
 
     while (!ok && !cancel) {
         werase(win);
@@ -2768,8 +2923,17 @@ bool App::inputDialog(const std::string& title, const std::string& label, std::s
             if (cw >= 0)
                 mvwaddch(win, fieldY, fieldX + cw, ' ' | A_REVERSE);
         }
-        drawDlgButton(win, btnY, okX, "确定", true);
-        drawDlgButton(win, btnY, noX, "取消", false);
+        int hoverBtn = -1;
+        if (mouseValid && mouseY == btnY) {
+            if (mouseX >= okX && mouseX < okX + bw1)
+                hoverBtn = 0;
+            else if (mouseX >= noX && mouseX < noX + bw2)
+                hoverBtn = 1;
+        }
+        drawDlgButton(win, btnY, okX, "确定", true, hoverBtn == 0,
+                      attrHover, attrSelHover);
+        drawDlgButton(win, btnY, noX, "取消", false, hoverBtn == 1,
+                      attrHover, attrSelHover);
         wrefresh(win);
 
         wint_t wc = 0;
@@ -2779,28 +2943,33 @@ bool App::inputDialog(const std::string& title, const std::string& label, std::s
         if (r == KEY_CODE_YES) {
             if (wc == KEY_MOUSE) {
                 MEVENT ev;
-                if (getmouse(&ev) == OK &&
-                    (ev.bstate & (BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED))) {
-                    int ly = ev.y - y;
-                    int lx = ev.x - x;
-                    if (ly == fieldY && lx >= fieldX && lx < fieldX + fieldW) {
-                        selAll = false;
-                        int target = lx - fieldX;
-                        size_t p2 = 0;
-                        int cw2 = 0;
-                        while (p2 < val.size()) {
-                            size_t np = nextUtf8Pos(val, p2);
-                            int c = utf8Cols(val.substr(p2, np - p2));
-                            if (cw2 + c > target)
-                                break;
-                            cw2 += c;
-                            p2 = np;
+                if (getmouse(&ev) == OK) {
+                    if (ev.bstate & REPORT_MOUSE_POSITION) {
+                        mouseValid = true;
+                        mouseY = ev.y - y;
+                        mouseX = ev.x - x;
+                    } else if (ev.bstate & (BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED)) {
+                        int ly = ev.y - y;
+                        int lx = ev.x - x;
+                        if (ly == fieldY && lx >= fieldX && lx < fieldX + fieldW) {
+                            selAll = false;
+                            int target = lx - fieldX;
+                            size_t p2 = 0;
+                            int cw2 = 0;
+                            while (p2 < val.size()) {
+                                size_t np = nextUtf8Pos(val, p2);
+                                int c = utf8Cols(val.substr(p2, np - p2));
+                                if (cw2 + c > target)
+                                    break;
+                                cw2 += c;
+                                p2 = np;
+                            }
+                            pos = p2;
+                        } else if (ly == btnY && lx >= okX && lx < okX + bw1) {
+                            ok = true;
+                        } else if (ly == btnY && lx >= noX && lx < noX + bw2) {
+                            cancel = true;
                         }
-                        pos = p2;
-                    } else if (ly == btnY && lx >= okX && lx < okX + bw1) {
-                        ok = true;
-                    } else if (ly == btnY && lx >= noX && lx < noX + bw2) {
-                        cancel = true;
                     }
                 }
             } else if (wc == KEY_BACKSPACE) {
@@ -2932,10 +3101,18 @@ App::Cmd App::popupMenu(const std::vector<MenuItem>& items, int px, int py) {
 
     Cmd ret = CMD_NONE;
     bool close = false;
+    int mouseY = -1, mouseX = -1;
+    bool mouseValid = false;
 
     while (ret == CMD_NONE && !close) {
         werase(win);
         box(win, 0, 0);
+        int hoverAi = -1;
+        if (mouseValid && mouseY >= 1 && mouseY <= n && mouseX >= 1 && mouseX < w - 1) {
+            int idx = top + (mouseY - 1);
+            if (idx >= 0 && idx < total && !items[idx].sep && items[idx].enabled)
+                hoverAi = idx;
+        }
         for (int i = 0; i < n; ++i) {
             int ai = top + i;
             if (ai >= total)
@@ -2948,8 +3125,13 @@ App::Cmd App::popupMenu(const std::vector<MenuItem>& items, int px, int py) {
             if (!items[ai].enabled)
                 attr |= A_DIM;
             if (ai == focus)
-                attr = attrSel | A_BOLD;
-            wput(win, 1 + i, 1, w - 2, "  " + items[ai].label, attr);
+                attr = (hoverAi == ai ? attrSelHover : attrSel) | A_BOLD;
+            else if (hoverAi == ai)
+                attr = attrHover | A_BOLD;
+            std::string text = "  " + items[ai].label;
+            if (hoverAi == ai)
+                wput(win, 1 + i, 1, w - 2, "", attr);
+            wput(win, 1 + i, 1, w - 2, text, attr);
         }
         if (top > 0)
             mvwaddch(win, 1, w - 2, ACS_UARROW);
@@ -2964,18 +3146,23 @@ App::Cmd App::popupMenu(const std::vector<MenuItem>& items, int px, int py) {
         if (r == KEY_CODE_YES) {
             if (wc == KEY_MOUSE) {
                 MEVENT ev;
-                if (getmouse(&ev) == OK &&
-                    (ev.bstate & (BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED))) {
-                    int ly = ev.y - y;
-                    int lx = ev.x - x;
-                    if (ly >= 1 && ly <= n && lx >= 1 && lx < w - 1) {
-                        int idx = top + (ly - 1);
-                        if (idx >= 0 && idx < total && !items[idx].sep && items[idx].enabled)
-                            ret = items[idx].cmd;
-                        else if (idx >= total)
+                if (getmouse(&ev) == OK) {
+                    if (ev.bstate & REPORT_MOUSE_POSITION) {
+                        mouseValid = true;
+                        mouseY = ev.y - y;
+                        mouseX = ev.x - x;
+                    } else if (ev.bstate & (BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED)) {
+                        int ly = ev.y - y;
+                        int lx = ev.x - x;
+                        if (ly >= 1 && ly <= n && lx >= 1 && lx < w - 1) {
+                            int idx = top + (ly - 1);
+                            if (idx >= 0 && idx < total && !items[idx].sep && items[idx].enabled)
+                                ret = items[idx].cmd;
+                            else if (idx >= total)
+                                close = true;
+                        } else {
                             close = true;
-                    } else {
-                        close = true;
+                        }
                     }
                 }
             } else if (wc == KEY_UP || wc == KEY_DOWN) {
