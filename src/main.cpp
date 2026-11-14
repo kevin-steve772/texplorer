@@ -172,6 +172,16 @@ static void wput(WINDOW* win, int y, int x, int w, const std::string& text, int 
     wattroff(win, attr);
 }
 
+static void enableMouseMotion() {
+    std::fputs("\033[?1002h\033[?1003h", stdout);
+    std::fflush(stdout);
+}
+
+static void disableMouseMotion() {
+    std::fputs("\033[?1003l\033[?1002l", stdout);
+    std::fflush(stdout);
+}
+
 static std::string toUtf8(wchar_t wc) {
     char buf[MB_LEN_MAX];
     mbstate_t st{};
@@ -596,6 +606,14 @@ private:
     int lastClickX = -1, lastClickY = -1;
     std::chrono::steady_clock::time_point lastRightTime;
 
+    bool scrollbarVisible = false;
+    bool scrollbarHover = false;
+    bool scrollbarDragging = false;
+    bool leftButtonDown = false;
+    bool skipDraw = false;
+    int scrollbarDragOffset = 0;
+    Rect scrollThumbRect, scrollTrackRect;
+
     int toolbarY = 0, addrY = 1, contentTop = 2, contentBottom = 0;
     int statusY = 0;
     int sidebarW = 0;
@@ -630,6 +648,8 @@ private:
     void drawAddress();
     void drawSidebar();
     void drawList();
+    void drawScrollbar();
+    void scrollToMouse(int y);
     void drawStatus();
 
     void refresh();
@@ -712,8 +732,9 @@ void App::run() {
         attrSel = A_REVERSE;
         attrChrome = A_REVERSE;
     }
-    mousemask(ALL_MOUSE_EVENTS, nullptr);
+    mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, nullptr);
     mouseinterval(0);
+    enableMouseMotion();
 
     initState(startPath);
     tabs.push_back(snapshotTab());
@@ -733,9 +754,11 @@ void App::run() {
             quit = processChar(wc);
         if (quit || shouldQuit)
             running = false;
-        else
+        else if (!skipDraw)
             draw();
+        skipDraw = false;
     }
+    disableMouseMotion();
     endwin();
 }
 
@@ -865,6 +888,7 @@ void App::draw() {
     drawAddress();
     drawSidebar();
     drawList();
+    drawScrollbar();
     drawStatus();
 
     wrefresh(stdscr);
@@ -1200,6 +1224,59 @@ void App::drawList() {
             wput(stdscr, y, colSizeX, colSizeW, fitRight(sizeText, colSizeW - 1), metaAttr);
         }
     }
+}
+
+void App::scrollToMouse(int y) {
+    int total = (int)entries.size();
+    int maxScroll = std::max(0, total - visibleRows);
+    if (maxScroll <= 0)
+        return;
+    int trackTop = scrollTrackRect.h > 0 ? scrollTrackRect.y : rowsTop;
+    int trackH = scrollTrackRect.h > 0 ? scrollTrackRect.h : visibleRows;
+    int thumbH = scrollThumbRect.h > 0 ? scrollThumbRect.h : 1;
+    if (trackH <= thumbH) {
+        scroll = 0;
+        return;
+    }
+    int span = trackH - thumbH;
+    int thumbTop = std::clamp(y - scrollbarDragOffset, trackTop, trackTop + span);
+    scroll = (int)((long long)(thumbTop - trackTop) * maxScroll / span);
+    scroll = std::clamp(scroll, 0, maxScroll);
+}
+
+void App::drawScrollbar() {
+    scrollThumbRect = scrollTrackRect = Rect{};
+    int total = (int)entries.size();
+    if (visibleRows <= 0 || total <= visibleRows) {
+        scrollbarVisible = false;
+        scrollbarHover = false;
+        scrollbarDragging = false;
+        return;
+    }
+    scrollbarVisible = true;
+
+    int trackTop = rowsTop;
+    int trackH = visibleRows;
+    bool active = scrollbarHover || scrollbarDragging;
+    int x0 = COLS - 1;
+
+    int thumbH = (int)((long long)trackH * visibleRows / total);
+    if (thumbH < 1)
+        thumbH = 1;
+    if (thumbH > trackH)
+        thumbH = trackH;
+    int maxScroll = total - visibleRows;
+    if (maxScroll < 1)
+        maxScroll = 1;
+    int pos = std::clamp(scroll, 0, maxScroll);
+    int thumbTop = trackTop;
+    if (trackH > thumbH)
+        thumbTop += (int)((long long)(trackH - thumbH) * pos / maxScroll);
+
+    for (int y = thumbTop; y < thumbTop + thumbH; ++y)
+        wput(stdscr, y, x0, 1, active ? "┃" : "⏐", attrChrome | A_BOLD);
+    scrollThumbRect = Rect{thumbTop, x0, thumbH, 1};
+    scrollTrackRect = Rect{trackTop, x0, trackH, 1};
 }
 
 void App::drawStatus() {
@@ -1561,6 +1638,7 @@ void App::openExternal(const fs::path& p) {
                        ::access(p.c_str(), X_OK) == 0);
 
     def_prog_mode();
+    disableMouseMotion();
     endwin();
 
     pid_t pid = fork();
@@ -1579,6 +1657,8 @@ void App::openExternal(const fs::path& p) {
 
     reset_prog_mode();
     ::refresh();
+    mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, nullptr);
+    enableMouseMotion();
 
     if (pid < 0) {
         setStatus("无法启动进程");
@@ -2030,6 +2110,56 @@ void App::handleMouse() {
         return;
     int x = ev.x;
     int y = ev.y;
+    bool inScrollArea = scrollbarVisible && y >= rowsTop && y <= rowsBottom &&
+                        x >= COLS - 2;
+
+    bool leftRelease = (ev.bstate & (BUTTON1_RELEASED | BUTTON1_CLICKED |
+                                     BUTTON1_DOUBLE_CLICKED)) != 0;
+    if (leftRelease) {
+        leftButtonDown = false;
+        if (scrollbarDragging) {
+            scrollbarDragging = false;
+            scrollbarHover = inScrollArea;
+            return;
+        }
+        if (inScrollArea)
+            return;
+    }
+    if (ev.bstate & BUTTON1_PRESSED)
+        leftButtonDown = true;
+
+    if (leftButtonDown && inScrollArea) {
+        if (!scrollbarDragging) {
+            scrollbarDragging = true;
+            scrollbarHover = true;
+            if (scrollThumbRect.h > 0 && scrollThumbRect.contains(y, x)) {
+                scrollbarDragOffset = y - scrollThumbRect.y;
+            } else {
+                scrollbarDragOffset = std::max(0, scrollThumbRect.h / 2);
+                scrollToMouse(y);
+            }
+        } else {
+            int oldScroll = scroll;
+            scrollToMouse(y);
+            if (scroll == oldScroll)
+                skipDraw = true;
+        }
+        return;
+    }
+    if (scrollbarDragging) {
+        int oldScroll = scroll;
+        scrollToMouse(y);
+        if (scroll == oldScroll)
+            skipDraw = true;
+        return;
+    }
+
+    if (ev.bstate & REPORT_MOUSE_POSITION) {
+        if (inScrollArea == scrollbarHover)
+            skipDraw = true;
+        scrollbarHover = inScrollArea;
+        return;
+    }
 
     if (ev.bstate & (BUTTON4_PRESSED | BUTTON4_CLICKED)) {
         if (y >= contentTop && y <= contentBottom) {
@@ -2091,6 +2221,7 @@ void App::handleMouse() {
         shouldQuit = true;
         return;
     }
+
     if (left && y == toolbarY) {
         for (const auto& b : tabCloseButtons) {
             if (b.r.contains(y, x)) {
@@ -2110,6 +2241,9 @@ void App::handleMouse() {
         }
         return;
     }
+
+    if (right && inScrollArea)
+        return;
 
     if (right) {
         if (y >= rowsTop && y <= rowsBottom) {
