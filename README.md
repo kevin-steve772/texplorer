@@ -1,6 +1,8 @@
 # TExplorer
 
-TExplorer 是一个使用 C++17 和 ncursesw 编写的终端文件管理器。界面与操作方式参考 Windows 资源管理器，支持键盘、鼠标、标签页、地址栏导航和中文界面。
+TExplorer 是一个使用 C++17 编写的终端文件管理器，同时支持 Linux 和 Windows。界面与操作方式参考 Windows 资源管理器，支持键盘、鼠标、标签页、地址栏导航和中文界面。
+
+Linux 下基于 ncursesw，Windows 下基于 PDCursesMod（宽字符 + UTF-8）。
 
 ## 功能特性
 
@@ -8,7 +10,7 @@ TExplorer 是一个使用 C++17 和 ncursesw 编写的终端文件管理器。�
 - 多标签页：新建、关闭、切换，点击标签上的 × 或中键关闭
 - 文件操作：复制、剪切、粘贴、重命名、删除、新建文件夹、查看属性
 - 回收站：删除的项目移入左侧栏的回收站，可还原、永久删除或清空
-- 打开文件：普通文件使用 `nano` 编辑，可执行文件直接运行
+- 打开文件：Linux 下普通文件使用 `nano` 编辑，Windows 下使用系统默认程序打开；可执行文件直接运行
 - 多选：`Ctrl+单击` 多选、`Shift+单击` 连续选择、`Ctrl+A` 全选
 - 排序：按名称、修改日期、类型、大小排序，支持升序 / 降序；点击表头也可切换
 - 显示 / 隐藏隐藏文件
@@ -29,7 +31,7 @@ TExplorer 是一个使用 C++17 和 ncursesw 编写的终端文件管理器。�
 
 ## 构建
 
-### 依赖
+### Linux 依赖
 
 - 支持 C++17 的编译器（g++ 或 clang++）
 - CMake >= 3.16
@@ -61,7 +63,19 @@ Arch Linux：
 sudo pacman -S base-devel cmake pkgconf ncurses nano
 ```
 
-### 编译
+### macOS 依赖
+
+- 支持 C++17 的编译器（Apple Clang）
+- CMake >= 3.16
+- pkg-config
+- ncurses（Homebrew 版 `ncurses`/`ncursesw`）
+- nano（编辑普通文件时使用）
+
+```bash
+brew install cmake pkg-config ncurses nano
+```
+
+### 编译（Linux / macOS）
 
 推荐使用独立构建目录：
 
@@ -70,23 +84,66 @@ cmake -S . -B build
 cmake --build build -j
 ```
 
-也可以在当前目录直接构建：
+### 编译（Windows）
 
-```bash
-cmake .
-make
+Windows 构建会自动通过 CMake `FetchContent` 下载并编译
+[PDCursesMod](https://github.com/Bill-Gray/PDCursesMod)，因此需要网络连接。
+
+使用 MinGW-w64 + Ninja：
+
+```powershell
+cmake -S . -B build -G Ninja
+cmake --build build
+```
+
+使用 MSVC（Visual Studio 生成器）：
+
+```powershell
+cmake -S . -B build
+cmake --build build --config Release
+```
+
+### Windows 安装与卸载
+
+PowerShell 安装脚本会从 GitHub Releases 下载适合当前系统的 `.exe`，
+安装到 `%LOCALAPPDATA%\Programs\TExplorer`，并将目录加入当前用户的 `PATH`：
+
+```powershell
+.\install.ps1
+```
+
+可通过 `-Version` 指定 Release 标签、`-Asset` 指定资源名称、`-Repo` 指定仓库；
+使用 `-NoPath` 可跳过修改 `PATH`。安装后新开终端即可运行 `TExplorer`。
+
+卸载程序并移除用户 `PATH` 中的安装目录：
+
+```powershell
+.\uninstall.ps1
+```
+
+卸载默认保留回收站数据；确认要清除时使用 `.\uninstall.ps1 -PurgeData`。
+自定义安装目录时，安装和卸载都可使用 `-InstallDir` 指定。
+
+如果已经有较新的 PDCursesMod 源码（v4.5.4 tag 不能直接在子目录中使用），
+可以指定本地目录，避免联网：
+
+```powershell
+cmake -S . -B build -G Ninja -DTEXPLORER_PDCURSES_SOURCE=C:\path\to\PDCursesMod
+cmake --build build
 ```
 
 ## 运行
+
+Linux：
 
 ```bash
 ./build/TExplorer [目录]
 ```
 
-如果使用当前目录构建，则运行：
+Windows：
 
-```bash
-./TExplorer [目录]
+```powershell
+.\build\TExplorer.exe [目录]
 ```
 
 不指定目录时打开当前工作目录。查看帮助：
@@ -95,11 +152,13 @@ make
 ./build/TExplorer --help
 ```
 
-建议使用 UTF-8 locale，例如 `zh_CN.UTF-8` 或 `C.UTF-8`。在 tmux 中使用鼠标时，需要开启 tmux 的鼠标支持：
+Linux 下建议使用 UTF-8 locale，例如 `zh_CN.UTF-8` 或 `C.UTF-8`。在 tmux 中使用鼠标时，需要开启 tmux 的鼠标支持：
 
 ```tmux
 set -g mouse on
 ```
+
+Windows 下程序会自动将控制台切换为 UTF-8 代码页，建议使用 Windows Terminal。
 
 ## 快捷键
 
@@ -110,7 +169,7 @@ set -g mouse on
 | `↑` / `↓` | 上下移动光标 |
 | `PgUp` / `PgDn` | 翻页 |
 | `Home` / `End` | 跳到列表首 / 尾 |
-| `Enter` | 打开选中项目；文件用 `nano` 编辑，可执行文件直接运行 |
+| `Enter` | 打开选中项目；Linux 下文件用 `nano` 编辑，Windows 下用默认程序打开 |
 | `Backspace` | 后退 |
 | `Ctrl+U` | 上一级目录 |
 | `Ctrl+A` | 全选 |
@@ -168,27 +227,35 @@ set -g mouse on
 - 删除项目时默认移入回收站，不再直接永久删除。
 - 左侧导航栏中的“回收站”入口可查看已删除项目。
 - 在回收站中按 `a` 或右键打开动作菜单，可以还原、永久删除选中项目，或清空回收站。
-- 回收站遵循 freedesktop.org Trash 规范，默认位于 `~/.local/share/Trash`（可通过 `XDG_DATA_HOME` 修改）。
+- 回收站跨平台可用：
+  - Linux：遵循 freedesktop.org Trash 规范，默认位于 `~/.local/share/Trash`（可通过 `XDG_DATA_HOME` 修改）。
+  - Windows：位于 `%LOCALAPPDATA%\TExplorer\Trash`，使用相同的 `files` / `info` 结构。
 - 回收站中暂不支持复制、剪切、粘贴、重命名和新建文件夹。
 
 ## 项目结构
 
 ```text
 .
-├── CMakeLists.txt   # CMake 构建配置
+├── CMakeLists.txt   # CMake 构建配置（Linux: ncursesw，Windows: PDCursesMod）
 ├── README.md
 └── src
-    └── main.cpp     # 全部实现：界面、事件、文件操作
+    ├── main.cpp     # 界面、事件、文件操作
+    └── platform.h   # 平台抽象接口
+    └── platform.cpp # Windows / Linux 平台实现
 ```
 
 ## 说明
 
 - 删除操作默认将项目移入回收站，不再直接永久删除。
-- 回收站位于 `~/.local/share/Trash`（遵循 `XDG_DATA_HOME`），兼容 freedesktop.org Trash 规范。
+- Linux 回收站位于 `~/.local/share/Trash`（遵循 `XDG_DATA_HOME`），兼容 freedesktop.org Trash 规范。
+- Windows 回收站位于 `%LOCALAPPDATA%\TExplorer\Trash`，由程序自行管理（不是系统回收站）。
 - 在回收站中可还原选中项目；永久删除和清空回收站操作无法撤销。
 - 回收站中暂不支持复制、剪切、粘贴、重命名和新建文件夹。
-- 打开普通文件时会暂停 TUI 并调用 `nano`，退出 `nano` 后自动恢复界面。
-- 具有执行权限的普通文件会直接在当前终端运行，程序结束后恢复 TUI。
+- Linux 下打开普通文件时会暂停 TUI 并调用 `nano`，退出 `nano` 后自动恢复界面；
+  具有执行权限的普通文件会直接在当前终端运行。
+- Windows 下使用系统默认程序（`ShellExecute`）打开文件，不会暂停 TUI。
+- Windows 隐藏文件按 `FILE_ATTRIBUTE_HIDDEN` 判断，Linux 按文件名是否以 `.` 开头判断。
+- Windows 左侧导航窗格会列出所有可用磁盘分区；根目录/面包屑显示为 `C:\` 形式。
 - 复制 / 剪切 / 粘贴为应用内剪贴板，不调用系统剪贴板。
 - 标签页共享隐藏文件显示、导航窗格等全局视图设置。
 - 项目当前没有配置文件，启动参数仅支持起始目录。

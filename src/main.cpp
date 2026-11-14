@@ -1,4 +1,8 @@
+#ifdef _WIN32
+#include <curses.h>
+#else
 #include <ncurses.h>
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -6,7 +10,6 @@
 #include <climits>
 #include <cmath>
 #include <cstdint>
-#include <clocale>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -16,20 +19,24 @@
 #include <fstream>
 #include <set>
 #include <string>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <strings.h>
 #include <unordered_map>
 #include <vector>
 
+#include "platform.h"
+
 namespace fs = std::filesystem;
 
+#ifdef _WIN32
+static const char* ICON_DIR = "▣";
+static const char* ICON_FILE = "▤";
+static const char* ICON_LINK = "↗";
+static const char* ICON_TRASH = "♻";
+#else
 static const char* ICON_DIR = "📁";
 static const char* ICON_FILE = "📄";
 static const char* ICON_LINK = "🔗";
+static const char* ICON_TRASH = "🗑";
+#endif
 
 static std::string sanitize(const std::string& s) {
     std::string out;
@@ -90,7 +97,7 @@ static int utf8Cols(const std::string& s) {
             --n;
             continue;
         }
-        int cw = wcwidth(wc);
+        int cw = plat::charWidth(wc);
         if (cw < 0)
             cw = 0;
         w += cw;
@@ -116,7 +123,7 @@ static std::string utf8Clip(const std::string& s, int maxCols) {
         size_t r = mbrtowc(&wc, p, n, &st);
         if (r == (size_t)-1 || r == (size_t)-2 || r == 0)
             break;
-        int cw = wcwidth(wc);
+        int cw = plat::charWidth(wc);
         if (cw < 0)
             cw = 0;
         if (w + cw > target)
@@ -158,7 +165,7 @@ static std::string centerCols(const std::string& s, int w) {
     return std::string((size_t)left, ' ') + s;
 }
 
-static void wput(WINDOW* win, int y, int x, int w, const std::string& text, int attr = 0) {
+static void wput(WINDOW* win, int y, int x, int w, const std::string& text, chtype attr = 0) {
     if (!win || w <= 0)
         return;
     int maxw = getmaxx(win) - x;
@@ -173,13 +180,11 @@ static void wput(WINDOW* win, int y, int x, int w, const std::string& text, int 
 }
 
 static void enableMouseMotion() {
-    std::fputs("\033[?1002h\033[?1003h", stdout);
-    std::fflush(stdout);
+    plat::enableMouseMotion();
 }
 
 static void disableMouseMotion() {
-    std::fputs("\033[?1003l\033[?1002l", stdout);
-    std::fflush(stdout);
+    plat::disableMouseMotion();
 }
 
 static std::string toUtf8(wchar_t wc) {
@@ -235,7 +240,7 @@ static std::string humanSize(uintmax_t n) {
 
 static std::string formatTime(std::time_t t) {
     std::tm tm{};
-    if (t <= 0 || !localtime_r(&t, &tm))
+    if (t <= 0 || !plat::localTime(t, tm))
         return "";
     char buf[64];
     std::strftime(buf, sizeof(buf), "%Y/%m/%d %H:%M", &tm);
@@ -247,7 +252,7 @@ static std::string typeFor(const fs::path& p, bool isDir, bool isLink) {
         return isDir ? "文件夹快捷方式" : "快捷方式";
     if (isDir)
         return "文件夹";
-    std::string ext = p.extension().string();
+    std::string ext = plat::pathToUtf8(p.extension());
     if (!ext.empty() && ext[0] == '.')
         ext.erase(ext.begin());
     ext = asciiLower(ext);
@@ -324,7 +329,7 @@ static std::vector<std::string> wrapText(const std::string& s, int width) {
             n -= r;
             continue;
         }
-        int cw = wcwidth(wc);
+        int cw = plat::charWidth(wc);
         if (cw < 0)
             cw = 0;
         if (curW + cw > width && curW > 0) {
@@ -350,8 +355,18 @@ static fs::path normPath(const fs::path& p) {
     return ec ? p : a;
 }
 
+static bool pathEqual(const fs::path& a, const fs::path& b) {
+#ifdef _WIN32
+    std::string sa = plat::pathToUtf8(a);
+    std::string sb = plat::pathToUtf8(b);
+    return plat::caseCmp(sa.c_str(), sb.c_str()) == 0;
+#else
+    return a == b;
+#endif
+}
+
 static bool samePath(const fs::path& a, const fs::path& b) {
-    return normPath(a) == normPath(b);
+    return pathEqual(normPath(a), normPath(b));
 }
 
 static bool isSubPath(const fs::path& child, const fs::path& parent) {
@@ -360,20 +375,10 @@ static bool isSubPath(const fs::path& child, const fs::path& parent) {
     auto ci = c.begin();
     auto pi = p.begin();
     for (; pi != p.end(); ++pi, ++ci) {
-        if (ci == c.end() || *ci != *pi)
+        if (ci == c.end() || !pathEqual(*ci, *pi))
             return false;
     }
     return true;
-}
-
-static fs::path trashBasePath() {
-    const char* xdg = std::getenv("XDG_DATA_HOME");
-    if (xdg && *xdg)
-        return fs::path(xdg) / "Trash";
-    const char* home = std::getenv("HOME");
-    if (home && *home)
-        return fs::path(home) / ".local" / "share" / "Trash";
-    return fs::path(".local") / "share" / "Trash";
 }
 
 static std::string urlEncodePath(const std::string& s) {
@@ -424,7 +429,7 @@ static std::string urlDecodePath(const std::string& s) {
 static std::string deletionDate() {
     std::time_t now = std::time(nullptr);
     std::tm tmv{};
-    localtime_r(&now, &tmv);
+    plat::localTime(now, tmv);
     char buf[32] = {};
     std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tmv);
     return buf;
@@ -435,7 +440,7 @@ static bool writeTrashInfo(const fs::path& infoPath, const fs::path& original) {
     if (!out)
         return false;
     out << "[Trash Info]\n";
-    out << "Path=" << urlEncodePath(original.string()) << "\n";
+    out << "Path=" << urlEncodePath(plat::pathToUtf8(original)) << "\n";
     out << "DeletionDate=" << deletionDate() << "\n";
     out.flush();
     return out.good();
@@ -453,7 +458,7 @@ static bool readTrashInfo(const fs::path& infoPath, fs::path& original) {
             std::string decoded = urlDecodePath(line.substr(5));
             if (decoded.empty())
                 return false;
-            original = fs::path(decoded);
+            original = plat::pathFromUtf8(decoded);
             return true;
         }
     }
@@ -483,9 +488,10 @@ static int dlgButtonW(const std::string& label) {
 }
 
 static void drawDlgButton(WINDOW* win, int y, int x, const std::string& label,
-                          bool primary, bool hovered, int attrHover, int attrSelHover) {
+                          bool primary, bool hovered, chtype attrHover,
+                          chtype attrSelHover) {
     std::string s = "[ " + label + " ]";
-    int attr = 0;
+    chtype attr = 0;
     if (primary)
         attr = hovered ? (attrSelHover | A_BOLD) : A_REVERSE;
     else if (hovered)
@@ -597,10 +603,10 @@ private:
     std::string statusMessage;
     uintmax_t freeBytes = 0;
     bool freeOk = false;
-    int attrSel = A_REVERSE;
-    int attrChrome = A_REVERSE;
-    int attrHover = A_BOLD;
-    int attrSelHover = A_REVERSE | A_BOLD;
+    chtype attrSel = A_REVERSE;
+    chtype attrChrome = A_REVERSE;
+    chtype attrHover = A_BOLD;
+    chtype attrSelHover = A_REVERSE | A_BOLD;
     int mouseX = -1, mouseY = -1;
     bool mouseValid = false;
 
@@ -724,7 +730,9 @@ void App::run() {
     noecho();
     keypad(stdscr, TRUE);
     curs_set(0);
+#ifdef NCURSES_VERSION
     set_escdelay(25);
+#endif
     if (has_colors()) {
         start_color();
         use_default_colors();
@@ -795,7 +803,7 @@ void App::initState(const fs::path& start) {
         ec.clear();
         p = fs::current_path(ec);
         if (ec)
-            p = fs::path("/");
+            p = plat::homeDir();
     }
     current = p;
     history.clear();
@@ -806,7 +814,7 @@ void App::initState(const fs::path& start) {
     anchor = 0;
     selected.clear();
 
-    fs::path trashBase = trashBasePath();
+    fs::path trashBase = plat::trashBaseDir();
     trashFiles = trashBase / "files";
     trashInfo = trashBase / "info";
     std::error_code tec;
@@ -815,30 +823,11 @@ void App::initState(const fs::path& start) {
     fs::create_directories(trashInfo, tec);
 
     quickItems.clear();
-    const char* home = std::getenv("HOME");
-    if (home && *home) {
-        fs::path h(home);
-        struct Def {
-            const char* icon;
-            const char* label;
-            const char* sub;
-        };
-        static const Def defs[] = {
-            {"~", "主页", nullptr},       {"▣", "桌面", "Desktop"},
-            {"▤", "文档", "Documents"},   {"↓", "下载", "Downloads"},
-            {"▦", "图片", "Pictures"},    {"♪", "音乐", "Music"},
-            {"▷", "视频", "Videos"},
-        };
-        for (const auto& d : defs) {
-            fs::path q = d.sub ? h / d.sub : h;
-            std::error_code e2;
-            if (fs::is_directory(q, e2))
-                quickItems.push_back({d.icon, d.label, normPath(q)});
-            e2.clear();
-        }
-    }
-    quickItems.push_back({"/", "根目录", fs::path("/")});
-    quickItems.push_back({"🗑", "回收站", normPath(trashFiles)});
+    for (const auto& loc : plat::userLocations())
+        quickItems.push_back({loc.icon, loc.label, normPath(loc.path)});
+    for (const auto& loc : plat::rootLocations())
+        quickItems.push_back({loc.icon, loc.label, normPath(loc.path)});
+    quickItems.push_back({ICON_TRASH, "回收站", normPath(trashFiles)});
 
     refresh();
 }
@@ -1084,10 +1073,10 @@ void App::drawTabs() {
         Rect closeR{toolbarY, x + lw, 1, 2};
         bool closeHover = mouseHover() && closeR.contains(mouseY, mouseX);
         bool tabHover = !closeHover && mouseHover() && tabR.contains(mouseY, mouseX);
-        int attr = (i == activeTab) ? (attrSel | A_BOLD) : attrChrome;
+        chtype attr = (i == activeTab) ? (attrSel | A_BOLD) : attrChrome;
         if (tabHover || closeHover)
             attr = (i == activeTab) ? (attrSelHover | A_BOLD) : attrHover;
-        int closeAttr = closeHover
+        chtype closeAttr = closeHover
                             ? ((i == activeTab) ? (attrSelHover | A_BOLD)
                                                : (attrHover | A_BOLD))
                             : attr;
@@ -1132,7 +1121,7 @@ void App::drawAddress() {
             break;
         Rect r{addrY, x, 1, w};
         bool hov = d.enabled && mouseHover() && r.contains(mouseY, mouseX);
-        int attr = d.enabled ? ((hov ? attrSelHover : attrSel) | A_BOLD)
+        chtype attr = d.enabled ? ((hov ? attrSelHover : attrSel) | A_BOLD)
                              : (attrChrome | A_DIM);
         wput(stdscr, addrY, x, w, label, attr);
         toolbarButtons.push_back(Btn{r, d.id, d.enabled});
@@ -1143,7 +1132,7 @@ void App::drawAddress() {
     if (inTrash()) {
         crumbRects.clear();
         crumbPaths.clear();
-        std::string lab = "🗑 回收站";
+        std::string lab = std::string(ICON_TRASH) + " 回收站";
         int lw = utf8Cols(lab);
         if (startX + lw <= COLS - 1) {
             Rect r{addrY, startX, 1, lw};
@@ -1170,10 +1159,11 @@ void App::drawAddress() {
     std::vector<std::string> labels;
     for (size_t i = 0; i < chain.size(); ++i) {
         if (i == 0) {
-            labels.push_back("/");
+            labels.push_back(plat::rootLabel(chain[i]));
         } else {
-            std::string nm = chain[i].filename().string();
-            labels.push_back(nm.empty() ? sanitize(chain[i].string()) : sanitize(nm));
+            std::string nm = plat::pathToUtf8(chain[i].filename());
+            labels.push_back(nm.empty() ? sanitize(plat::pathToUtf8(chain[i]))
+                                        : sanitize(nm));
         }
     }
 
@@ -1250,7 +1240,7 @@ void App::drawSidebar() {
         bool active = samePath(current, q.path);
         Rect r{y, 0, 1, sidebarW};
         bool hov = mouseHover() && r.contains(mouseY, mouseX);
-        int attr;
+        chtype attr;
         if (active)
             attr = (hov ? attrSelHover : attrSel) | A_BOLD;
         else
@@ -1332,14 +1322,14 @@ void App::drawList() {
         bool cur = (i == cursor);
         bool highlight = sel || cur;
         bool hovered = (i == hoverIdx);
-        int base = highlight ? (hovered ? attrSelHover : attrSel)
+        chtype base = highlight ? (hovered ? attrSelHover : attrSel)
                              : (hovered ? attrHover : 0);
         if (hovered)
             wput(stdscr, y, listX, listW, "", base);
-        int nameAttr = base;
+        chtype nameAttr = base;
         if (e.isDir || cur)
             nameAttr |= A_BOLD;
-        int metaAttr = (highlight || hovered) ? base : A_DIM;
+        chtype metaAttr = (highlight || hovered) ? base : A_DIM;
 
         std::string icon = e.isLink ? ICON_LINK : (e.isDir ? ICON_DIR : ICON_FILE);
         std::string nameText = icon + " " + sanitize(e.name);
@@ -1402,7 +1392,7 @@ void App::drawScrollbar() {
     if (trackH > thumbH)
         thumbTop += (int)((long long)(trackH - thumbH) * pos / maxScroll);
 
-    int thumbAttr = active ? (attrHover | A_BOLD) : (attrChrome | A_BOLD);
+    chtype thumbAttr = active ? (attrHover | A_BOLD) : (attrChrome | A_BOLD);
     for (int y = thumbTop; y < thumbTop + thumbH; ++y)
         wput(stdscr, y, x0, 1, active ? "┃" : "⏐", thumbAttr);
     scrollThumbRect = Rect{thumbTop, x0, thumbH, 1};
@@ -1454,13 +1444,13 @@ void App::sortEntries() {
         int cmp = 0;
         switch (sortKey) {
         case SortKey::Name:
-            cmp = strcasecmp(a.name.c_str(), b.name.c_str());
+            cmp = plat::caseCmp(a.name.c_str(), b.name.c_str());
             break;
         case SortKey::Date:
             cmp = (a.mtime < b.mtime) ? -1 : (a.mtime > b.mtime ? 1 : 0);
             break;
         case SortKey::Type:
-            cmp = strcasecmp(a.type.c_str(), b.type.c_str());
+            cmp = plat::caseCmp(a.type.c_str(), b.type.c_str());
             break;
         case SortKey::Size:
             cmp = (a.size < b.size) ? -1 : (a.size > b.size ? 1 : 0);
@@ -1469,7 +1459,7 @@ void App::sortEntries() {
         if (!sortAsc)
             cmp = -cmp;
         if (cmp == 0)
-            cmp = strcasecmp(a.name.c_str(), b.name.c_str());
+            cmp = plat::caseCmp(a.name.c_str(), b.name.c_str());
         return cmp < 0;
     });
 }
@@ -1520,8 +1510,8 @@ void App::refresh() {
     fs::directory_iterator end;
     while (!ec && it != end) {
         fs::path p = it->path();
-        std::string nm = p.filename().string();
-        if (!nm.empty() && (showHidden || nm[0] != '.')) {
+        std::string nm = plat::pathToUtf8(p.filename());
+        if (!nm.empty() && (showHidden || !plat::isHidden(p))) {
             Entry e;
             e.name = nm;
             e.path = p;
@@ -1529,10 +1519,10 @@ void App::refresh() {
             e.isDir = it->is_directory(e2);
             e2.clear();
             e.isLink = it->is_symlink(e2);
-            struct stat st;
-            if (::stat(p.c_str(), &st) == 0) {
-                e.size = (uintmax_t)st.st_size;
-                e.mtime = st.st_mtime;
+            plat::FileMeta meta = plat::statFile(p);
+            if (meta.ok) {
+                e.size = meta.size;
+                e.mtime = meta.mtime;
             }
             e.type = typeFor(p, e.isDir, e.isLink);
             entries.push_back(std::move(e));
@@ -1614,7 +1604,7 @@ void App::ensureVisible() {
 void App::navigate(const fs::path& p, bool addHistory) {
     std::error_code ec;
     if (!fs::is_directory(p, ec)) {
-        statusMessage = "无法打开: " + sanitize(p.string());
+        statusMessage = "无法打开: " + sanitize(plat::pathToUtf8(p));
         return;
     }
     fs::path abs = fs::absolute(p, ec);
@@ -1763,43 +1753,25 @@ void App::openCurrent() {
 }
 
 void App::openExternal(const fs::path& p) {
-    struct stat st{};
-    bool executable = (::stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
-                       ::access(p.c_str(), X_OK) == 0);
+    bool executable = plat::isExecutable(p);
+    bool suspend = plat::openNeedsSuspend();
 
-    def_prog_mode();
-    disableMouseMotion();
-    endwin();
-
-    pid_t pid = fork();
-    if (pid == 0) {
-        (void)chdir(current.c_str());
-        if (executable)
-            execl(p.c_str(), p.filename().c_str(), (char*)nullptr);
-        else
-            execlp("nano", "nano", p.c_str(), (char*)nullptr);
-        _exit(127);
+    if (suspend) {
+        def_prog_mode();
+        disableMouseMotion();
+        endwin();
     }
 
-    int status = 0;
-    if (pid > 0)
-        waitpid(pid, &status, 0);
+    plat::OpenOutcome outcome = plat::openExternal(p, current, executable);
 
-    reset_prog_mode();
-    ::refresh();
-    mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, nullptr);
-    enableMouseMotion();
-
-    if (pid < 0) {
-        setStatus("无法启动进程");
-    } else if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
-        setStatus(executable ? "无法运行: " + p.filename().string()
-                             : "无法启动 nano");
-    } else if (executable) {
-        setStatus("已运行 " + p.filename().string());
-    } else {
-        setStatus("已用 nano 编辑 " + p.filename().string());
+    if (suspend) {
+        reset_prog_mode();
+        ::refresh();
+        mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, nullptr);
+        enableMouseMotion();
     }
+
+    setStatus(outcome.message);
     refresh();
 }
 
@@ -1810,20 +1782,21 @@ bool App::inTrash() const {
 std::string App::displayName(const fs::path& p) const {
     if (!trashFiles.empty() && samePath(p, trashFiles))
         return "回收站";
-    std::string name = p.filename().string();
-    return name.empty() ? "/" : name;
+    std::string name = plat::pathToUtf8(p.filename());
+    return name.empty() ? plat::rootLabel(p) : name;
 }
 
 std::string App::uniqueTrashName(const std::string& filename) const {
     auto exists = [&](const std::string& n) {
         std::error_code e;
-        return fs::exists(trashFiles / n, e) || fs::exists(trashInfo / (n + ".trashinfo"), e);
+        return fs::exists(plat::joinPath(trashFiles, n), e) ||
+               fs::exists(plat::joinPath(trashInfo, n + ".trashinfo"), e);
     };
     if (!exists(filename))
         return filename;
-    fs::path fp(filename);
-    std::string stem = fp.stem().string();
-    std::string ext = fp.extension().string();
+    fs::path fp = plat::pathFromUtf8(filename);
+    std::string stem = plat::pathToUtf8(fp.stem());
+    std::string ext = plat::pathToUtf8(fp.extension());
     if (stem.empty())
         stem = filename;
     for (int i = 2; i < 10000; ++i) {
@@ -1853,13 +1826,13 @@ void App::moveToTrash(const std::vector<fs::path>& items) {
         if (!ae)
             original = abs;
 
-        std::string name = uniqueTrashName(src.filename().string());
-        fs::path dst = trashFiles / name;
+        std::string name = uniqueTrashName(plat::pathToUtf8(src.filename()));
+        fs::path dst = plat::joinPath(trashFiles, name);
         if (!movePath(src, dst, e)) {
             fail++;
             continue;
         }
-        fs::path info = trashInfo / (name + ".trashinfo");
+        fs::path info = plat::joinPath(trashInfo, name + ".trashinfo");
         if (!writeTrashInfo(info, original)) {
             std::error_code e2;
             movePath(dst, src, e2);
@@ -1888,7 +1861,9 @@ void App::trashDeleteSelection(const std::vector<fs::path>& items) {
             continue;
         }
         std::error_code e2;
-        fs::remove(trashInfo / (p.filename().string() + ".trashinfo"), e2);
+        fs::remove(plat::joinPath(trashInfo,
+                                  plat::pathToUtf8(p.filename()) + ".trashinfo"),
+                   e2);
         ok++;
     }
     refresh();
@@ -1910,8 +1885,8 @@ void App::restoreSelection() {
 
     int ok = 0, fail = 0;
     for (const fs::path& src : items) {
-        std::string name = src.filename().string();
-        fs::path info = trashInfo / (name + ".trashinfo");
+        std::string name = plat::pathToUtf8(src.filename());
+        fs::path info = plat::joinPath(trashInfo, name + ".trashinfo");
         fs::path original;
         if (!readTrashInfo(info, original)) {
             fail++;
@@ -1921,7 +1896,9 @@ void App::restoreSelection() {
         std::error_code ec;
         fs::path parent = original.parent_path();
         if (parent.empty())
-            parent = fs::path("/");
+            parent = original.root_path();
+        if (parent.empty())
+            parent = plat::homeDir();
         fs::create_directories(parent, ec);
         if (ec) {
             fail++;
@@ -1930,7 +1907,8 @@ void App::restoreSelection() {
 
         fs::path dst = original;
         if (fs::exists(dst, ec))
-            dst = parent / uniqueName(parent, original.filename().string());
+            dst = plat::joinPath(
+                parent, uniqueName(parent, plat::pathToUtf8(original.filename())));
 
         ec.clear();
         if (!movePath(src, dst, ec)) {
@@ -1995,27 +1973,27 @@ void App::copySel(bool cut) {
 
 std::string App::uniqueName(const fs::path& dir, const std::string& base) const {
     std::error_code ec;
-    if (!fs::exists(dir / base, ec))
+    if (!fs::exists(plat::joinPath(dir, base), ec))
         return base;
     for (int i = 2; i < 10000; ++i) {
         std::string n = base + " (" + std::to_string(i) + ")";
-        if (!fs::exists(dir / n, ec))
+        if (!fs::exists(plat::joinPath(dir, n), ec))
             return n;
     }
     return base;
 }
 
 std::string App::uniqueCopyName(const fs::path& dir, const std::string& filename) const {
-    fs::path fp(filename);
-    std::string stem = fp.stem().string();
-    std::string ext = fp.extension().string();
+    fs::path fp = plat::pathFromUtf8(filename);
+    std::string stem = plat::pathToUtf8(fp.stem());
+    std::string ext = plat::pathToUtf8(fp.extension());
     std::string base = stem + " - 副本" + ext;
     std::error_code ec;
-    if (!fs::exists(dir / base, ec))
+    if (!fs::exists(plat::joinPath(dir, base), ec))
         return base;
     for (int i = 2; i < 10000; ++i) {
         std::string n = stem + " - 副本 (" + std::to_string(i) + ")" + ext;
-        if (!fs::exists(dir / n, ec))
+        if (!fs::exists(plat::joinPath(dir, n), ec))
             return n;
     }
     return base;
@@ -2050,10 +2028,12 @@ void App::paste() {
             continue;
         }
         if (samePath(src, dst)) {
-            dst = target / uniqueCopyName(target, src.filename().string());
+            dst = plat::joinPath(
+                target, uniqueCopyName(target, plat::pathToUtf8(src.filename())));
         } else if (fs::exists(dst, ec)) {
             bool ow = confirmDialog("确认替换", "目标位置已存在同名项目：\n" +
-                                                      sanitize(src.filename().string()) +
+                                                      sanitize(plat::pathToUtf8(
+                                                          src.filename())) +
                                                       "\n\n是否替换？");
             if (!ow) {
                 skipped++;
@@ -2136,11 +2116,11 @@ void App::newFolder() {
     std::string name = uniqueName(current, "新建文件夹");
     if (!inputDialog("新建文件夹", "文件夹名称:", name))
         return;
-    if (name.empty() || name.find('/') != std::string::npos) {
+    if (!plat::validFileName(name)) {
         infoDialog("新建文件夹", {"名称无效。"});
         return;
     }
-    fs::path p = current / name;
+    fs::path p = plat::joinPath(current, name);
     std::error_code ec;
     if (fs::exists(p, ec)) {
         infoDialog("新建文件夹", {"该名称已存在。"});
@@ -2171,13 +2151,13 @@ void App::renameCurrent() {
     std::string name = e.name;
     if (!inputDialog("重命名", "新名称:", name))
         return;
-    if (name.empty() || name.find('/') != std::string::npos) {
+    if (!plat::validFileName(name)) {
         infoDialog("重命名", {"名称无效。"});
         return;
     }
     if (name == e.name)
         return;
-    fs::path dst = e.path.parent_path() / name;
+    fs::path dst = plat::joinPath(e.path.parent_path(), name);
     std::error_code ec;
     if (fs::exists(dst, ec)) {
         infoDialog("重命名", {"该名称已存在。"});
@@ -2204,11 +2184,11 @@ void App::showProperties() {
     const Entry& e = entries[cursor];
     std::vector<std::string> lines;
     lines.push_back("名称: " + sanitize(e.name));
-    lines.push_back("位置: " + sanitize(current.string()));
+    lines.push_back("位置: " + sanitize(plat::pathToUtf8(current)));
     lines.push_back("类型: " + e.type);
     lines.push_back("大小: " + (e.isDir ? std::string("—") : humanSize(e.size)));
     lines.push_back("修改时间: " + formatTime(e.mtime));
-    lines.push_back("完整路径: " + sanitize(e.path.string()));
+    lines.push_back("完整路径: " + sanitize(plat::pathToUtf8(e.path)));
     infoDialog("属性", lines);
 }
 
@@ -2225,7 +2205,7 @@ void App::showHelp() {
                            "编辑：Ctrl+C 复制，Ctrl+X 剪切，Ctrl+V 粘贴，Ctrl+A 全选。",
                            "鼠标：单击选择，双击打开，滚轮滚动，右键菜单。",
                            "多选：Shift+单击 连续，Ctrl+单击 多选。",
-                           "打开：普通文件用 nano，可执行文件直接运行。",
+                           "打开：文件夹进入下一级；文件用系统默认程序打开。",
                            "回收站：删除的项目移入左侧回收站；在其中可还原或永久删除。",
                            "Esc 清除状态；直接输入文件名前缀可快速定位。",
                        });
@@ -3121,7 +3101,7 @@ App::Cmd App::popupMenu(const std::vector<MenuItem>& items, int px, int py) {
                 mvwhline(win, 1 + i, 1, ACS_HLINE, w - 2);
                 continue;
             }
-            int attr = 0;
+            chtype attr = 0;
             if (!items[ai].enabled)
                 attr |= A_DIM;
             if (ai == focus)
@@ -3207,17 +3187,19 @@ App::Cmd App::popupMenu(const std::vector<MenuItem>& items, int px, int py) {
 }
 
 int main(int argc, char** argv) {
-    std::setlocale(LC_ALL, "");
-    if (argc > 1) {
-        std::string arg = argv[1];
+    plat::initConsole();
+    std::vector<std::string> args = plat::commandLineArgs(argc, argv);
+    if (args.size() > 1) {
+        const std::string& arg = args[1];
         if (arg == "-h" || arg == "--help") {
-            std::printf("用法: %s [目录]\n", argv[0]);
+            std::printf("用法: %s [目录]\n", args[0].c_str());
             std::printf("TExplorer — 简易 TUI 文件资源管理器（支持鼠标）。\n");
             return 0;
         }
     }
 
-    fs::path start = (argc > 1) ? fs::path(argv[1]) : fs::current_path();
+    fs::path start = (args.size() > 1) ? plat::pathFromUtf8(args[1])
+                                       : fs::current_path();
     try {
         App app(start);
         app.run();
